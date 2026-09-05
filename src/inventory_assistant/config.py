@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import os
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -10,6 +12,7 @@ from pathlib import Path
 DEFAULT_DATABASE_PATH = Path("data/inventory.db")
 DEFAULT_ANTHROPIC_MODEL = "claude-haiku-4-5-20251001"
 DEFAULT_MCP_LOG_PATH = Path("logs/mcp.jsonl")
+DEFAULT_MCP_DEMO_ROOT = Path("demo_workspace")
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,6 +75,71 @@ class MCPClientConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class ExternalMCPConfig:
+    """Configuration for the optional local Filesystem and Git MCP servers."""
+
+    filesystem_enabled: bool
+    filesystem_command: tuple[str, ...]
+    git_enabled: bool
+    git_command: tuple[str, ...]
+    demo_root: Path
+    git_repository: Path
+
+    @classmethod
+    def from_env(cls, *, project_root: Path | None = None) -> "ExternalMCPConfig":
+        root = (project_root or Path.cwd()).resolve()
+        configured_demo_root = Path(
+            os.getenv("MCP_DEMO_ROOT", str(DEFAULT_MCP_DEMO_ROOT))
+        )
+        demo_root = _resolve_from(root, configured_demo_root)
+        configured_repository = Path(
+            os.getenv("GIT_MCP_REPOSITORY", "repository")
+        )
+        git_repository = (
+            _resolve_from(demo_root, configured_repository)
+            if not configured_repository.is_absolute()
+            else configured_repository.resolve()
+        )
+        _validate_demo_paths(root, demo_root, git_repository)
+
+        filesystem_executable = os.getenv(
+            "FILESYSTEM_MCP_COMMAND",
+            "npx.cmd" if os.name == "nt" else "npx",
+        ).strip()
+        git_executable = os.getenv("GIT_MCP_COMMAND", sys.executable).strip()
+        if not filesystem_executable:
+            raise ConfigurationError("FILESYSTEM_MCP_COMMAND cannot be empty")
+        if not git_executable:
+            raise ConfigurationError("GIT_MCP_COMMAND cannot be empty")
+
+        filesystem_args = _command_arguments_from_env(
+            "FILESYSTEM_MCP_ARGS",
+            ("-y", "@modelcontextprotocol/server-filesystem"),
+        )
+        git_args = _command_arguments_from_env(
+            "GIT_MCP_ARGS",
+            ("-m", "mcp_server_git"),
+        )
+        return cls(
+            filesystem_enabled=_boolean_from_env("FILESYSTEM_MCP_ENABLED", False),
+            filesystem_command=(
+                filesystem_executable,
+                *filesystem_args,
+                str(demo_root),
+            ),
+            git_enabled=_boolean_from_env("GIT_MCP_ENABLED", False),
+            git_command=(
+                git_executable,
+                *git_args,
+                "--repository",
+                str(git_repository),
+            ),
+            demo_root=demo_root,
+            git_repository=git_repository,
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class ChatbotConfig:
     max_tool_iterations: int
 
@@ -106,3 +174,52 @@ def _positive_float_from_env(name: str, default: float) -> float:
     if value <= 0:
         raise ConfigurationError(f"{name} must be greater than 0")
     return value
+
+
+def _boolean_from_env(name: str, default: bool) -> bool:
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+    normalized = raw_value.strip().casefold()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ConfigurationError(f"{name} must be true or false")
+
+
+def _command_arguments_from_env(
+    name: str,
+    default: tuple[str, ...],
+) -> tuple[str, ...]:
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+    try:
+        arguments = json.loads(raw_value)
+    except json.JSONDecodeError as error:
+        raise ConfigurationError(f"{name} must be a JSON array of strings") from error
+    if not isinstance(arguments, list) or not all(
+        isinstance(argument, str) and argument for argument in arguments
+    ):
+        raise ConfigurationError(f"{name} must be a JSON array of strings")
+    return tuple(arguments)
+
+
+def _resolve_from(base: Path, path: Path) -> Path:
+    return path.resolve() if path.is_absolute() else (base / path).resolve()
+
+
+def _validate_demo_paths(
+    project_root: Path,
+    demo_root: Path,
+    git_repository: Path,
+) -> None:
+    if demo_root == project_root or project_root.is_relative_to(demo_root):
+        raise ConfigurationError(
+            "MCP_DEMO_ROOT must not expose the project root or one of its parents"
+        )
+    if not git_repository.is_relative_to(demo_root):
+        raise ConfigurationError(
+            "GIT_MCP_REPOSITORY must be inside MCP_DEMO_ROOT"
+        )

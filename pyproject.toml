@@ -9,6 +9,9 @@ description = "Inventory domain and reproducible SQLite database for a universit
 requires-python = ">=3.11"
 dependencies = ["anthropic>=1.0.0,<2.0.0"]
 
+[project.optional-dependencies]
+external-mcp = ["mcp-server-git>=2026.8.18,<2027"]
+
 [tool.setuptools.packages.find]
 where = ["src"]
 

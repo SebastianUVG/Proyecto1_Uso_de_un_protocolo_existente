@@ -10,11 +10,16 @@ from inventory_assistant.config import (
     AnthropicConfig,
     ChatbotConfig,
     ConfigurationError,
+    ExternalMCPConfig,
     MCPClientConfig,
 )
 from inventory_assistant.llm import LLMProviderError
 from inventory_assistant.llm.anthropic_provider import AnthropicLLMProvider
-from inventory_assistant.mcp.client import LocalMCPClient, MCPClientError
+from inventory_assistant.mcp.client import MCPClientError
+from inventory_assistant.mcp.manager import (
+    MCPServerManager,
+    configured_server_definitions,
+)
 
 from .session import ChatbotError, ChatbotSession
 
@@ -23,13 +28,17 @@ def main() -> None:
     try:
         anthropic_config = AnthropicConfig.from_env()
         mcp_config = MCPClientConfig.from_env()
+        external_mcp_config = ExternalMCPConfig.from_env()
         chatbot_config = ChatbotConfig.from_env()
         provider = AnthropicLLMProvider(anthropic_config)
     except (ConfigurationError, LLMProviderError) as error:
         print(f"Configuration error: {error}")
         return
 
-    client = LocalMCPClient(mcp_config)
+    client = MCPServerManager(
+        mcp_config,
+        configured_server_definitions(external_mcp_config),
+    )
     try:
         client.connect()
         session = ChatbotSession(
@@ -42,8 +51,8 @@ def main() -> None:
         print(f"Startup error: {error}")
         return
 
-    print("Inventory Assistant")
-    print("Type /exit to quit or /logs to show recent MCP interactions.")
+    print("MCP Assistant")
+    print("Type /exit to quit, /servers to inspect servers, or /logs for MCP logs.")
     try:
         while True:
             try:
@@ -54,6 +63,9 @@ def main() -> None:
                 break
             if user_message.casefold() == "/logs":
                 _show_recent_logs(mcp_config.log_path)
+                continue
+            if user_message.casefold() == "/servers":
+                _show_servers(client)
                 continue
             if not user_message:
                 continue
@@ -67,6 +79,12 @@ def main() -> None:
     finally:
         client.close()
         print("Goodbye.")
+
+
+def _show_servers(manager: MCPServerManager) -> None:
+    for status in manager.statuses:
+        state = "connected" if status.connected else "disconnected"
+        print(f"{status.name} ({status.transport}): {state}, {len(status.tools)} tools")
 
 
 def _show_recent_logs(path: Path, limit: int = 20) -> None:
@@ -89,4 +107,3 @@ def _show_recent_logs(path: Path, limit: int = 20) -> None:
 
 if __name__ == "__main__":
     main()
-

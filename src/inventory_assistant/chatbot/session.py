@@ -17,12 +17,14 @@ from inventory_assistant.llm import (
 from inventory_assistant.mcp.client import MCPClientError, MCPRemoteError
 
 
-SYSTEM_PROMPT = """You are a helpful business inventory assistant.
-Answer general questions directly from your knowledge. When a question requires
-inventory data, use the available tools instead of inventing values. Explain tool
-results clearly in the user's language. Preserve conversational context and use it
-to understand follow-up references. Do not claim that an operation succeeded when
-a tool result reports an error."""
+SYSTEM_PROMPT = """You are a helpful assistant connected to several MCP servers.
+Answer general questions directly from your knowledge. Use the available tools
+when a request requires current inventory data, controlled filesystem operations,
+or Git operations. Tool names and descriptions identify their source server and
+scope. Choose tools through their schemas, never invent tool results, and coordinate
+multiple tools when the request requires it. Explain results in the user's language.
+Preserve conversational context and use it to understand follow-up references. Do
+not claim that an operation succeeded when a tool result reports an error."""
 
 
 class MCPToolClient(Protocol):
@@ -143,7 +145,7 @@ class ChatbotSession:
                 is_error=True,
             )
         except MCPClientError as error:
-            raise ChatbotError("The Inventory MCP Server request failed") from error
+            raise ChatbotError("An MCP server request failed") from error
 
         is_error = result.get("isError") is True
         payload = result.get("structuredContent", result)
@@ -156,4 +158,3 @@ class ChatbotSession:
             ),
             is_error=is_error,
         )
-

@@ -7,6 +7,9 @@ data/
 # Local MCP interaction logs
 logs/
 
+# Sandboxed Filesystem and Git MCP demonstration data
+demo_workspace/
+
 # Python-generated files
 __pycache__/
 *.py[cod]

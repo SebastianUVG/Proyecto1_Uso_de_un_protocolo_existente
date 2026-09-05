@@ -27,7 +27,7 @@ from .protocol import MCP_PROTOCOL_VERSION
 
 CLIENT_NAME = "inventory-chatbot-mcp-client"
 CLIENT_VERSION = "0.1.0"
-SERVER_NAME = "inventory-mcp-server"
+DEFAULT_SERVER_NAME = "inventory-mcp-server"
 
 
 class MCPClientError(Exception):
@@ -69,11 +69,15 @@ class LocalMCPClient:
         self,
         config: MCPClientConfig,
         *,
+        server_name: str = DEFAULT_SERVER_NAME,
         command: Sequence[str] | None = None,
         environment: Mapping[str, str] | None = None,
         working_directory: Path | None = None,
     ) -> None:
+        if not server_name or not server_name.strip():
+            raise ValueError("server_name must be a non-empty string")
         self._config = config
+        self._server_name = server_name.strip()
         self._command = tuple(command or (
             sys.executable,
             "-m",
@@ -127,17 +131,17 @@ class LocalMCPClient:
             )
         except (OSError, ValueError) as error:
             raise MCPServerProcessError(
-                "Unable to start the Inventory MCP Server"
+                f"Unable to start MCP server '{self._server_name}'"
             ) from error
 
         self._reader_thread = threading.Thread(
             target=self._read_stdout,
-            name="inventory-mcp-stdout",
+            name=f"{self._server_name}-mcp-stdout",
             daemon=True,
         )
         self._stderr_thread = threading.Thread(
             target=self._read_stderr,
-            name="inventory-mcp-stderr",
+            name=f"{self._server_name}-mcp-stderr",
             daemon=True,
         )
         self._reader_thread.start()
@@ -293,7 +297,7 @@ class LocalMCPClient:
         process = self._ensure_process_running()
         self._logger.log_message(
             "client -> server",
-            SERVER_NAME,
+            self._server_name,
             method,
             request_id,
             message,
@@ -306,7 +310,7 @@ class LocalMCPClient:
                 process.stdin.flush()
         except (BrokenPipeError, OSError) as error:
             raise MCPServerProcessError(
-                "Inventory MCP Server is not accepting requests"
+                f"MCP server '{self._server_name}' is not accepting requests"
             ) from error
 
     def _read_stdout(self) -> None:
@@ -334,7 +338,7 @@ class LocalMCPClient:
                 return
             self._logger.log_message(
                 "server -> client",
-                SERVER_NAME,
+                self._server_name,
                 pending.method,
                 response.request_id,
                 response.raw,
@@ -342,7 +346,9 @@ class LocalMCPClient:
             pending.responses.put(response)
         if not self._closing.is_set():
             self._fail_pending(
-                MCPServerProcessError("Inventory MCP Server terminated unexpectedly")
+                MCPServerProcessError(
+                    f"MCP server '{self._server_name}' terminated unexpectedly"
+                )
             )
 
     def _read_stderr(self) -> None:
@@ -370,7 +376,9 @@ class LocalMCPClient:
         if process is None:
             raise MCPClientError("MCP client is not started")
         if process.poll() is not None:
-            raise MCPServerProcessError("Inventory MCP Server is not running")
+            raise MCPServerProcessError(
+                f"MCP server '{self._server_name}' is not running"
+            )
         return process
 
     def _ensure_connected(self) -> None:
