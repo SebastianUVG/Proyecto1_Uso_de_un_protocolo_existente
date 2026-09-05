@@ -1,4 +1,4 @@
-"""Provider-neutral LLM interfaces and the Anthropic adapter."""
+"""Provider-neutral LLM interfaces used by API adapters and the chatbot."""
 
 from .base import (
     ConversationMessage,
@@ -23,4 +23,3 @@ __all__ = [
     "ToolUseBlock",
     "mcp_tools_to_llm_tools",
 ]
-

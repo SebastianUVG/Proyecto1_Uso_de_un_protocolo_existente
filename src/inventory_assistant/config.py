@@ -8,9 +8,22 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+from dotenv import load_dotenv
+
+
+def _load_environment_file(path: Path | None = None) -> None:
+    """Load a local .env without replacing variables set by the shell."""
+
+    env_path = path if path is not None else Path.cwd() / ".env"
+    load_dotenv(dotenv_path=env_path, override=False)
+
+
+_load_environment_file()
+
 
 DEFAULT_DATABASE_PATH = Path("data/inventory.db")
 DEFAULT_ANTHROPIC_MODEL = "claude-haiku-4-5-20251001"
+DEFAULT_OPENAI_MODEL = "gpt-5.6-luna"
 DEFAULT_MCP_LOG_PATH = Path("logs/mcp.jsonl")
 DEFAULT_MCP_DEMO_ROOT = Path("demo_workspace")
 
@@ -56,6 +69,36 @@ class AnthropicConfig:
             model=model,
             max_tokens=max_tokens,
             timeout_seconds=timeout,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class OpenAIConfig:
+    api_key: str
+    model: str
+    max_output_tokens: int
+    timeout_seconds: float
+
+    @classmethod
+    def from_env(cls) -> "OpenAIConfig":
+        api_key = os.getenv("OPENAI_API_KEY", "").strip()
+        if not api_key:
+            raise ConfigurationError(
+                "OPENAI_API_KEY is not configured. In PowerShell, set it with: "
+                '$env:OPENAI_API_KEY = "your-key"'
+            )
+        model = os.getenv("OPENAI_MODEL", DEFAULT_OPENAI_MODEL).strip()
+        if not model:
+            raise ConfigurationError("OPENAI_MODEL cannot be empty")
+        return cls(
+            api_key=api_key,
+            model=model,
+            max_output_tokens=_positive_int_from_env(
+                "OPENAI_MAX_OUTPUT_TOKENS", 1024
+            ),
+            timeout_seconds=_positive_float_from_env(
+                "OPENAI_TIMEOUT_SECONDS", 60.0
+            ),
         )
 
 

@@ -7,7 +7,10 @@ name = "inventory-assistant"
 version = "0.1.0"
 description = "Inventory domain and reproducible SQLite database for a university networking project"
 requires-python = ">=3.11"
-dependencies = ["anthropic>=1.0.0,<2.0.0"]
+dependencies = [
+    "openai>=2.0.0,<3.0.0",
+    "python-dotenv>=1.0.0,<2.0.0",
+]
 
 [project.optional-dependencies]
 external-mcp = ["mcp-server-git>=2026.8.18,<2027"]

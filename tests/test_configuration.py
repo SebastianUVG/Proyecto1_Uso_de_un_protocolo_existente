@@ -12,6 +12,8 @@ from inventory_assistant.config import (
     AnthropicConfig,
     ConfigurationError,
     ExternalMCPConfig,
+    OpenAIConfig,
+    _load_environment_file,
 )
 
 
@@ -32,6 +34,44 @@ class AnthropicConfigurationTests(unittest.TestCase):
             config = AnthropicConfig.from_env()
         self.assertEqual(config.model, "test-model")
         self.assertEqual(config.max_tokens, 500)
+        self.assertEqual(config.timeout_seconds, 12.5)
+
+
+class OpenAIConfigurationTests(unittest.TestCase):
+    def test_loads_configuration_from_dotenv_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            env_path = Path(temporary_directory) / ".env"
+            env_path.write_text(
+                "OPENAI_API_KEY=dotenv-test-key-not-real\n"
+                "OPENAI_MODEL=dotenv-test-model\n",
+                encoding="utf-8",
+            )
+            with patch.dict(os.environ, {}, clear=True):
+                _load_environment_file(env_path)
+                config = OpenAIConfig.from_env()
+        self.assertEqual(config.api_key, "dotenv-test-key-not-real")
+        self.assertEqual(config.model, "dotenv-test-model")
+
+    def test_api_key_is_required_with_powershell_guidance(self) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            with self.assertRaises(ConfigurationError) as raised:
+                OpenAIConfig.from_env()
+        self.assertIn("OPENAI_API_KEY", str(raised.exception))
+        self.assertIn("PowerShell", str(raised.exception))
+        self.assertNotIn("Traceback", str(raised.exception))
+
+    def test_model_and_limits_are_configurable(self) -> None:
+        environment = {
+            "OPENAI_API_KEY": "test-key-not-real",
+            "OPENAI_MODEL": "test-model",
+            "OPENAI_MAX_OUTPUT_TOKENS": "500",
+            "OPENAI_TIMEOUT_SECONDS": "12.5",
+        }
+        with patch.dict(os.environ, environment, clear=True):
+            config = OpenAIConfig.from_env()
+        self.assertEqual(config.api_key, "test-key-not-real")
+        self.assertEqual(config.model, "test-model")
+        self.assertEqual(config.max_output_tokens, 500)
         self.assertEqual(config.timeout_seconds, 12.5)
 
 

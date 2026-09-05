@@ -1,12 +1,12 @@
 # Inventory Assistant
 
-This repository contains the incremental implementation of a multi-server assistant for a university networking project. It includes a terminal chatbot, an Anthropic LLM adapter, a manual local MCP client, an Inventory MCP Server, integrations with the existing Filesystem and Git MCP servers, and a reproducible SQLite inventory database. The host-side MCP client and JSON-RPC lifecycle are implemented without an MCP SDK or a JSON-RPC framework.
+This repository contains the incremental implementation of a multi-server assistant for a university networking project. It includes a terminal chatbot, an OpenAI LLM adapter, a manual local MCP client, an Inventory MCP Server, integrations with the existing Filesystem and Git MCP servers, and a reproducible SQLite inventory database. The host-side MCP client and JSON-RPC lifecycle are implemented without an MCP SDK or a JSON-RPC framework.
 
 ## Requirements
 
 - Python 3.11 or newer
-- An Anthropic API key for the real chatbot
-- The official `anthropic` Python package, installed by the setup command below
+- An OpenAI API key for the real chatbot
+- The official `openai` Python package, installed by the setup command below
 - Node.js and `npx` for the Filesystem MCP Server
 - Git and the external `mcp-server-git` Python package for the Git MCP Server
 
@@ -230,30 +230,39 @@ This no-API demonstration sends the natural-language request through the normal 
 5. inspect Git status and history;
 6. query low inventory in the same multi-server session.
 
-The scripted provider exists only to make the demonstration free and reproducible. The production chatbot sends the same dynamically discovered tools to Claude, which decides the sequence. Production code does not match keywords or hardcode this workflow.
+The scripted provider exists only to make the demonstration free and reproducible. The production chatbot sends the same dynamically discovered tools to OpenAI, which decides the sequence. Production code does not match keywords or hardcode this workflow.
 
-## Configure Anthropic
+## Configure OpenAI
 
-Set the API key in the current shell. Never write a real key in source code or commit it to the repository.
+Create `.env` in the repository root (beside `pyproject.toml`) and add your API key. The application loads this file automatically. `.env` is ignored by Git; never add the real key to `.env.example`, source code, or a commit.
+
+```env
+OPENAI_API_KEY=your-key
+OPENAI_MODEL=gpt-5.6-luna
+```
+
+Values already defined in the shell take precedence over `.env`. If you prefer a temporary shell variable instead, use the syntax for the shell you actually opened. See the [official OpenAI quickstart](https://developers.openai.com/api/docs/quickstart) for API-key setup guidance.
 
 PowerShell:
 
 ```powershell
-$env:ANTHROPIC_API_KEY = "your-key"
+$env:OPENAI_API_KEY = "your-key"
 ```
 
 macOS or Linux:
 
 ```bash
-export ANTHROPIC_API_KEY="your-key"
+export OPENAI_API_KEY="your-key"
 ```
+
+Git Bash on Windows uses the same `export` syntax as macOS and Linux. `$env:OPENAI_API_KEY = ...` works only in PowerShell.
 
 Optional configuration:
 
 ```powershell
-$env:ANTHROPIC_MODEL = "claude-haiku-4-5-20251001"
-$env:ANTHROPIC_MAX_TOKENS = "1024"
-$env:ANTHROPIC_TIMEOUT_SECONDS = "60"
+$env:OPENAI_MODEL = "gpt-5.6-luna"
+$env:OPENAI_MAX_OUTPUT_TOKENS = "1024"
+$env:OPENAI_TIMEOUT_SECONDS = "60"
 $env:MCP_REQUEST_TIMEOUT_SECONDS = "10"
 $env:MCP_LOG_PATH = "logs/mcp.jsonl"
 $env:MAX_TOOL_ITERATIONS = "5"
@@ -261,7 +270,17 @@ $env:FILESYSTEM_MCP_ENABLED = "true"
 $env:GIT_MCP_ENABLED = "true"
 ```
 
-The API key is required. The other settings have the defaults shown above. The default model favors low cost and latency for this academic demonstration and can be replaced without changing the MCP client.
+The API key is required. The other settings have the defaults shown above. `gpt-5.6-luna` is the default because OpenAI documents it as the GPT-5.6 option for cost-sensitive workloads and lists function calling among its supported tools. Change `OPENAI_MODEL` to use another compatible model without modifying code. See the [official model page](https://developers.openai.com/api/docs/models/gpt-5.6-luna).
+
+The provider uses the OpenAI Chat Completions API. Dynamically discovered MCP definitions are translated as follows:
+
+```text
+MCP name        -> OpenAI function name
+MCP description -> OpenAI function description
+MCP inputSchema -> OpenAI function parameters
+```
+
+When OpenAI returns an assistant `tool_call`, the provider converts it to the existing neutral `ToolUseBlock`. `ChatbotSession` routes and executes it through the manual MCP client. The resulting `ToolResultBlock` is sent back as a `tool` role message using the same `tool_call_id`. `OpenAILLMProvider` never calls MCP, InventoryService, or SQLite directly. This follows the [official OpenAI function calling flow](https://developers.openai.com/api/docs/guides/function-calling).
 
 ## Run the chatbot
 
@@ -299,14 +318,15 @@ MCP logs are stored separately from normal conversational output. Each entry con
 python -m unittest discover -s tests -v
 ```
 
-The suite covers the domain service, SQLite integration, JSON-RPC, MCP lifecycle, all six inventory tools, the real local MCP client and subprocess, request correlation, timeouts, multi-server registration, discovery, duplicate tool names, routing, disconnection, clean shutdown, tool-use loops, multiple tool calls, context, and tool errors. It uses a fake LLM provider and never consumes Anthropic API credits. Filesystem and Git tests use temporary or fake clients and never modify the main repository.
+The suite covers the domain service, SQLite integration, JSON-RPC, MCP lifecycle, all six inventory tools, the real local MCP client and subprocess, request correlation, timeouts, multi-server registration, discovery, duplicate tool names, routing, disconnection, clean shutdown, tool-use loops, multiple tool calls, context, OpenAI response conversion, and tool errors. It uses fake API clients and never consumes OpenAI API credits. Filesystem and Git tests use temporary or fake clients and never modify the main repository.
 
 ## Current architecture
 
 ```text
 Terminal chatbot
     -> LLMProvider
-    -> Anthropic Messages API
+    -> OpenAILLMProvider
+    -> OpenAI Chat Completions API
     -> MCPServerManager
        -> LocalMCPClient -> Inventory MCP Server
        -> LocalMCPClient -> Filesystem MCP Server
@@ -335,8 +355,8 @@ Implemented:
 - Newline-delimited local stdio transport
 - Redacted interaction logging to stderr
 - Manual local MCP client with IDs, response correlation, timeout, and shutdown
-- Dynamic conversion of discovered MCP tools to Anthropic tool definitions
-- Anthropic Messages API adapter
+- Dynamic conversion of discovered MCP tools to OpenAI function definitions
+- OpenAI Chat Completions API adapter
 - Multi-tool loop with a configurable iteration limit
 - In-memory conversation context for one terminal session
 - Terminal chatbot with `/logs` and `/exit`

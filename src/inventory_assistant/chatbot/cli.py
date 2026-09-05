@@ -7,14 +7,14 @@ from collections import deque
 from pathlib import Path
 
 from inventory_assistant.config import (
-    AnthropicConfig,
     ChatbotConfig,
     ConfigurationError,
     ExternalMCPConfig,
     MCPClientConfig,
+    OpenAIConfig,
 )
 from inventory_assistant.llm import LLMProviderError
-from inventory_assistant.llm.anthropic_provider import AnthropicLLMProvider
+from inventory_assistant.llm.openai_provider import OpenAILLMProvider
 from inventory_assistant.mcp.client import MCPClientError
 from inventory_assistant.mcp.manager import (
     MCPServerManager,
@@ -26,11 +26,11 @@ from .session import ChatbotError, ChatbotSession
 
 def main() -> None:
     try:
-        anthropic_config = AnthropicConfig.from_env()
+        openai_config = OpenAIConfig.from_env()
         mcp_config = MCPClientConfig.from_env()
         external_mcp_config = ExternalMCPConfig.from_env()
         chatbot_config = ChatbotConfig.from_env()
-        provider = AnthropicLLMProvider(anthropic_config)
+        provider = OpenAILLMProvider(openai_config)
     except (ConfigurationError, LLMProviderError) as error:
         print(f"Configuration error: {error}")
         return
