@@ -31,6 +31,16 @@ class JSONRPCRequest:
     raw: dict[str, Any]
 
 
+@dataclass(frozen=True, slots=True)
+class JSONRPCResponse:
+    """A validated JSON-RPC success or error response."""
+
+    request_id: RequestID
+    result: Any | None
+    error: dict[str, Any] | None
+    raw: dict[str, Any]
+
+
 class JSONRPCProtocolError(Exception):
     """An error that must be represented as a JSON-RPC error response."""
 
@@ -107,6 +117,38 @@ def parse_request(serialized: str) -> JSONRPCRequest:
     )
 
 
+def parse_response(serialized: str) -> JSONRPCResponse:
+    """Parse a response received by a JSON-RPC client."""
+
+    try:
+        message = json.loads(serialized)
+    except (json.JSONDecodeError, UnicodeDecodeError) as error:
+        raise JSONRPCProtocolError(PARSE_ERROR, "Invalid JSON-RPC response") from error
+    if not isinstance(message, dict):
+        raise JSONRPCProtocolError(INVALID_REQUEST, "Invalid JSON-RPC response")
+    if message.get("jsonrpc") != "2.0" or "id" not in message:
+        raise JSONRPCProtocolError(INVALID_REQUEST, "Invalid JSON-RPC response")
+    request_id = message["id"]
+    if not _is_valid_request_id(request_id):
+        raise JSONRPCProtocolError(INVALID_REQUEST, "Invalid JSON-RPC response")
+    has_result = "result" in message
+    has_error = "error" in message
+    if has_result == has_error:
+        raise JSONRPCProtocolError(
+            INVALID_REQUEST,
+            "A JSON-RPC response must contain exactly one of result or error",
+        )
+    response_error = message.get("error")
+    if has_error and not _is_valid_error_object(response_error):
+        raise JSONRPCProtocolError(INVALID_REQUEST, "Invalid JSON-RPC error response")
+    return JSONRPCResponse(
+        request_id=request_id,
+        result=message.get("result"),
+        error=response_error,
+        raw=message,
+    )
+
+
 def success_response(request_id: RequestID, result: dict[str, Any]) -> dict[str, Any]:
     return {"jsonrpc": "2.0", "id": request_id, "result": result}
 
@@ -132,4 +174,16 @@ def serialize_message(message: dict[str, Any]) -> str:
 def _is_valid_request_id(value: object) -> bool:
     return value is None or isinstance(value, str) or (
         isinstance(value, int) and not isinstance(value, bool)
+    )
+
+
+def _is_valid_error_object(value: object) -> bool:
+    if not isinstance(value, dict):
+        return False
+    code = value.get("code")
+    message = value.get("message")
+    return (
+        isinstance(code, int)
+        and not isinstance(code, bool)
+        and isinstance(message, str)
     )

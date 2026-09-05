@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import sys
+import threading
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, TextIO
 
 
@@ -36,7 +38,7 @@ class MCPInteractionLogger:
             "direction": direction,
             "method": method or message.get("method"),
             "request_id": message.get("id"),
-            "message": _redact(message),
+            "message": redact_secrets(message),
         }
         self._write(record)
 
@@ -73,12 +75,48 @@ class MCPInteractionLogger:
         )
 
 
-def _redact(value: Any) -> Any:
+class MCPClientFileLogger:
+    """Append redacted client-side MCP interactions to a JSONL file."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self._lock = threading.Lock()
+
+    def log_message(
+        self,
+        direction: str,
+        server: str,
+        method: str,
+        request_id: object,
+        message: dict[str, Any],
+    ) -> None:
+        record = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "direction": direction,
+            "server": server,
+            "method": method,
+            "request_id": request_id,
+            "message": redact_secrets(message),
+        }
+        serialized = json.dumps(
+            record, ensure_ascii=False, separators=(",", ":")
+        )
+        with self._lock:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            with self.path.open("a", encoding="utf-8") as log_file:
+                log_file.write(serialized + "\n")
+
+
+def redact_secrets(value: Any) -> Any:
     if isinstance(value, dict):
         return {
-            key: "[REDACTED]" if key.casefold() in SENSITIVE_KEYS else _redact(item)
+            key: (
+                "[REDACTED]"
+                if key.casefold() in SENSITIVE_KEYS
+                else redact_secrets(item)
+            )
             for key, item in value.items()
         }
     if isinstance(value, list):
-        return [_redact(item) for item in value]
+        return [redact_secrets(item) for item in value]
     return value

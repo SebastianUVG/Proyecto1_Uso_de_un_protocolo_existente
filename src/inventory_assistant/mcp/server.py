@@ -19,10 +19,10 @@ from .jsonrpc import (
     success_response,
 )
 from .logging import MCPInteractionLogger
+from .protocol import MCP_PROTOCOL_VERSION
 from .tools import InventoryToolDispatcher
 
 
-MCP_PROTOCOL_VERSION = "2025-06-18"
 SERVER_NAME = "inventory-mcp-server"
 SERVER_VERSION = "0.1.0"
 

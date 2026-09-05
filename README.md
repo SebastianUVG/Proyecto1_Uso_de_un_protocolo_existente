@@ -1,11 +1,12 @@
 # Inventory Assistant
 
-This repository contains the incremental implementation of an inventory assistant for a university networking project. The current stage includes the inventory domain, a reproducible SQLite database, and a local Inventory MCP Server implemented manually on top of JSON-RPC 2.0. It does **not** use an MCP SDK or a JSON-RPC framework.
+This repository contains the incremental implementation of an inventory assistant for a university networking project. It includes a terminal chatbot, an Anthropic LLM adapter, a manual local MCP client and server, and a reproducible SQLite inventory database. MCP and JSON-RPC are implemented without an MCP SDK or a JSON-RPC framework.
 
 ## Requirements
 
 - Python 3.11 or newer
-- No third-party runtime dependencies
+- An Anthropic API key for the real chatbot
+- The official `anthropic` Python package, installed by the setup command below
 
 ## Project setup
 
@@ -43,7 +44,7 @@ macOS or Linux example:
 export INVENTORY_DB_PATH="data/inventory.db"
 ```
 
-The `.env.example` file documents the available setting. The project does not automatically load `.env` files, which keeps this stage free of external dependencies.
+The `.env.example` file documents all available settings. The project does not automatically load `.env` files; set variables in the shell before running a command.
 
 ## Create the demonstration database
 
@@ -129,18 +130,78 @@ Exposed inventory tools:
 - `get_inactive_products`
 - `get_product_movement_ranking`
 
+## Configure Anthropic
+
+Set the API key in the current shell. Never write a real key in source code or commit it to the repository.
+
+PowerShell:
+
+```powershell
+$env:ANTHROPIC_API_KEY = "your-key"
+```
+
+macOS or Linux:
+
+```bash
+export ANTHROPIC_API_KEY="your-key"
+```
+
+Optional configuration:
+
+```powershell
+$env:ANTHROPIC_MODEL = "claude-haiku-4-5-20251001"
+$env:ANTHROPIC_MAX_TOKENS = "1024"
+$env:ANTHROPIC_TIMEOUT_SECONDS = "60"
+$env:MCP_REQUEST_TIMEOUT_SECONDS = "10"
+$env:MCP_LOG_PATH = "logs/mcp.jsonl"
+$env:MAX_TOOL_ITERATIONS = "5"
+```
+
+The API key is required. The other settings have the defaults shown above. The default model favors low cost and latency for this academic demonstration and can be replaced without changing the MCP client.
+
+## Run the chatbot
+
+Prepare SQLite and start the terminal chatbot from the repository root:
+
+```powershell
+python -m inventory_assistant.inventory.bootstrap --seed
+python -m inventory_assistant.chatbot.cli
+```
+
+Example prompts:
+
+```text
+You: Who was Alan Turing?
+You: What products have low stock?
+You: Which of those is the most urgent?
+```
+
+The LLM receives the inventory tools dynamically discovered from `tools/list`. It decides whether a question requires a tool; the chatbot contains no keyword rules for selecting tools.
+
+Chatbot commands:
+
+- `/logs` shows up to 20 recent MCP interactions from the JSONL log.
+- `/exit` closes the MCP server and ends the session.
+- `Ctrl+C` also closes the session cleanly.
+
+MCP logs are stored separately from normal conversational output. Each entry contains timestamp, direction, server, method, request ID, and the redacted JSON-RPC message. API keys and authorization values are never logged.
+
 ## Run the tests
 
 ```bash
 python -m unittest discover -s tests -v
 ```
 
-The suite covers the domain service, SQLite integration, manual JSON-RPC parsing and error responses, MCP lifecycle, all six tools, structured logging, and a real stdio subprocess. Temporary database files are created under the ignored `data/` directory.
+The suite covers the domain service, SQLite integration, JSON-RPC, MCP lifecycle, all six tools, the real local MCP client and subprocess, request correlation, timeouts, clean shutdown, tool-use loops, multiple tool calls, context, and tool errors. It uses a fake LLM provider and never consumes Anthropic API credits.
 
 ## Current architecture
 
 ```text
-stdio transport
+Terminal chatbot
+    -> LLMProvider
+    -> Anthropic Messages API
+    -> LocalMCPClient
+    -> stdio transport
     -> Inventory MCP Server
     -> Inventory Tool Dispatcher
     -> InventoryService
@@ -149,7 +210,7 @@ stdio transport
     -> SQLite
 ```
 
-JSON-RPC parsing, MCP lifecycle, tool adapters, business rules, and SQLite access are separate modules. Tool handlers call `InventoryService` and never execute SQL. Only `SQLiteInventoryRepository` and database initialization modules contain SQLite-specific code.
+The chatbot, provider adapter, manual MCP client, JSON-RPC implementation, MCP server, business rules, and SQLite access are separate modules. The Inventory MCP Server remains the source of truth for tool names, descriptions, and schemas.
 
 ## Current scope
 
@@ -164,13 +225,16 @@ Implemented:
 - Six validated inventory tool definitions with structured results
 - Newline-delimited local stdio transport
 - Redacted interaction logging to stderr
+- Manual local MCP client with IDs, response correlation, timeout, and shutdown
+- Dynamic conversion of discovered MCP tools to Anthropic tool definitions
+- Anthropic Messages API adapter
+- Multi-tool loop with a configurable iteration limit
+- In-memory conversation context for one terminal session
+- Terminal chatbot with `/logs` and `/exit`
 - Unit, integration, protocol, and end-to-end tests
 
 Not implemented yet:
 
-- MCP client for the chatbot
-- LLM integration
-- Conversation context and final chatbot
 - Streamable HTTP transport
 - Remote deployment
 - Filesystem MCP or Git MCP integrations

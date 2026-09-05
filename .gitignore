@@ -4,9 +4,13 @@
 # Generated databases and temporary integration-test data
 data/
 
+# Local MCP interaction logs
+logs/
+
 # Python-generated files
 __pycache__/
 *.py[cod]
+*.egg-info/
 .pytest_cache/
 .coverage
 htmlcov/
