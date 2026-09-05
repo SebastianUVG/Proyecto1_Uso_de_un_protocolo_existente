@@ -1,0 +1,2 @@
+"""Inventory assistant application package."""
+
