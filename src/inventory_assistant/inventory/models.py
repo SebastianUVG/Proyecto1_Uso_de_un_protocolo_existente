@@ -105,3 +105,24 @@ class StockMovementResult:
     previous_stock: int
     new_stock: int
     movement: InventoryMovement
+
+
+@dataclass(frozen=True, slots=True)
+class ProductUpdateResult:
+    previous_product: Product
+    product: Product
+    changed_fields: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class InventoryAdjustmentResult:
+    product: Product
+    previous_stock: int
+    counted_stock: int
+    difference: int
+    adjustment_type: MovementType | None
+    movement: InventoryMovement | None
+
+    @property
+    def resulting_stock(self) -> int:
+        return self.product.current_stock

@@ -14,10 +14,12 @@ from ..exceptions import (
     ProductNotFoundError,
 )
 from ..models import (
+    InventoryAdjustmentResult,
     InventoryMovement,
     MovementType,
     Product,
     ProductCreation,
+    ProductUpdateResult,
     StockMovementResult,
 )
 from .connection import SQLiteConnectionFactory
@@ -38,13 +40,53 @@ class SQLiteInventoryRepository:
     def get_product_by_name(self, name: str) -> Product | None:
         return self._get_product("name = ? COLLATE NOCASE", name)
 
-    def list_products(self, category: str | None = None) -> list[Product]:
+    def list_products(
+        self,
+        category: str | None = None,
+        *,
+        min_stock: int | None = None,
+        max_stock: int | None = None,
+        min_price_cents: int | None = None,
+        max_price_cents: int | None = None,
+        search: str | None = None,
+        limit: int | None = None,
+    ) -> list[Product]:
         query = "SELECT * FROM products"
-        parameters: tuple[object, ...] = ()
+        clauses: list[str] = []
+        parameters: list[object] = []
         if category is not None:
-            query += " WHERE category = ? COLLATE NOCASE"
-            parameters = (category,)
+            clauses.append("category = ? COLLATE NOCASE")
+            parameters.append(category)
+        if min_stock is not None:
+            clauses.append("current_stock >= ?")
+            parameters.append(min_stock)
+        if max_stock is not None:
+            clauses.append("current_stock <= ?")
+            parameters.append(max_stock)
+        if min_price_cents is not None:
+            clauses.append("unit_price_cents >= ?")
+            parameters.append(min_price_cents)
+        if max_price_cents is not None:
+            clauses.append("unit_price_cents <= ?")
+            parameters.append(max_price_cents)
+        if search is not None:
+            escaped = (
+                search.replace("\\", "\\\\")
+                .replace("%", "\\%")
+                .replace("_", "\\_")
+            )
+            pattern = f"%{escaped}%"
+            clauses.append(
+                "(sku LIKE ? ESCAPE '\\' COLLATE NOCASE "
+                "OR name LIKE ? ESCAPE '\\' COLLATE NOCASE)"
+            )
+            parameters.extend((pattern, pattern))
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
         query += " ORDER BY id"
+        if limit is not None:
+            query += " LIMIT ?"
+            parameters.append(limit)
         with self._connections.connect() as connection:
             rows = connection.execute(query, parameters).fetchall()
         return [self._product_from_row(row) for row in rows]
@@ -222,6 +264,144 @@ class SQLiteInventoryRepository:
             quantity=quantity,
             previous_stock=previous_stock,
             new_stock=new_stock,
+            movement=movement,
+        )
+
+    def update_product(
+        self,
+        *,
+        product_id: int,
+        name: str,
+        category: str,
+        minimum_stock: int,
+        target_stock: int,
+        unit_price_cents: int,
+    ) -> ProductUpdateResult:
+        timestamp = _utc_timestamp()
+        try:
+            with self._connections.connect() as connection:
+                with connection:
+                    connection.execute("BEGIN IMMEDIATE")
+                    previous_row = connection.execute(
+                        "SELECT * FROM products WHERE id = ?", (product_id,)
+                    ).fetchone()
+                    if previous_row is None:
+                        raise ProductNotFoundError("product not found")
+                    previous_product = self._product_from_row(previous_row)
+                    connection.execute(
+                        """
+                        UPDATE products
+                        SET name = ?, category = ?, minimum_stock = ?,
+                            target_stock = ?, unit_price_cents = ?, updated_at = ?
+                        WHERE id = ?
+                        """,
+                        (
+                            name,
+                            category,
+                            minimum_stock,
+                            target_stock,
+                            unit_price_cents,
+                            timestamp,
+                            product_id,
+                        ),
+                    )
+                    updated_row = connection.execute(
+                        "SELECT * FROM products WHERE id = ?", (product_id,)
+                    ).fetchone()
+                    product = self._product_from_row(updated_row)
+        except sqlite3.IntegrityError as error:
+            self._raise_integrity_error(error)
+
+        comparable_fields = (
+            ("name", "name"),
+            ("category", "category"),
+            ("minimum_stock", "minimum_stock"),
+            ("target_stock", "target_stock"),
+            ("unit_price", "unit_price_cents"),
+        )
+        changed_fields = tuple(
+            public_name
+            for public_name, attribute in comparable_fields
+            if getattr(previous_product, attribute) != getattr(product, attribute)
+        )
+        return ProductUpdateResult(
+            previous_product=previous_product,
+            product=product,
+            changed_fields=changed_fields,
+        )
+
+    def adjust_inventory(
+        self,
+        *,
+        product_id: int,
+        counted_stock: int,
+        movement_date: date,
+        reason: str | None,
+        reference: str | None,
+    ) -> InventoryAdjustmentResult:
+        timestamp = _utc_timestamp()
+        try:
+            with self._connections.connect() as connection:
+                with connection:
+                    connection.execute("BEGIN IMMEDIATE")
+                    product_row = connection.execute(
+                        "SELECT * FROM products WHERE id = ?", (product_id,)
+                    ).fetchone()
+                    if product_row is None:
+                        raise ProductNotFoundError("product not found")
+                    previous_stock = int(product_row["current_stock"])
+                    difference = counted_stock - previous_stock
+                    movement = None
+                    adjustment_type = None
+                    if difference != 0:
+                        adjustment_type = (
+                            MovementType.ADJUSTMENT_IN
+                            if difference > 0
+                            else MovementType.ADJUSTMENT_OUT
+                        )
+                        movement_cursor = connection.execute(
+                            """
+                            INSERT INTO inventory_movements (
+                                product_id, movement_type, quantity,
+                                movement_date, reason, reference, created_at
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            (
+                                product_id,
+                                adjustment_type.value,
+                                abs(difference),
+                                movement_date.isoformat(),
+                                reason,
+                                reference,
+                                timestamp,
+                            ),
+                        )
+                        connection.execute(
+                            """
+                            UPDATE products
+                            SET current_stock = ?, updated_at = ?
+                            WHERE id = ?
+                            """,
+                            (counted_stock, timestamp, product_id),
+                        )
+                        movement_row = connection.execute(
+                            "SELECT * FROM inventory_movements WHERE id = ?",
+                            (movement_cursor.lastrowid,),
+                        ).fetchone()
+                        movement = self._movement_from_row(movement_row)
+                    updated_row = connection.execute(
+                        "SELECT * FROM products WHERE id = ?", (product_id,)
+                    ).fetchone()
+                    product = self._product_from_row(updated_row)
+        except sqlite3.IntegrityError as error:
+            self._raise_integrity_error(error)
+
+        return InventoryAdjustmentResult(
+            product=product,
+            previous_stock=previous_stock,
+            counted_stock=counted_stock,
+            difference=difference,
+            adjustment_type=adjustment_type,
             movement=movement,
         )
 

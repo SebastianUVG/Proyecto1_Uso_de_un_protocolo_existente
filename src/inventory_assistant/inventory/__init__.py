@@ -1,12 +1,14 @@
 """Inventory domain, business logic, and persistence abstractions."""
 
 from .models import (
+    InventoryAdjustmentResult,
     InventoryMovement,
     MovementRanking,
     MovementType,
     Product,
     ProductActivity,
     ProductCreation,
+    ProductUpdateResult,
     ProductStock,
     RankingDirection,
     RankingMetric,
@@ -18,6 +20,7 @@ from .repository import InventoryRepository
 from .service import InventoryService
 
 __all__ = [
+    "InventoryAdjustmentResult",
     "InventoryMovement",
     "InventoryRepository",
     "InventoryService",
@@ -26,6 +29,7 @@ __all__ = [
     "Product",
     "ProductActivity",
     "ProductCreation",
+    "ProductUpdateResult",
     "ProductStock",
     "RankingDirection",
     "RankingMetric",

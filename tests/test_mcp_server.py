@@ -113,13 +113,13 @@ class MCPServerTests(unittest.TestCase):
         response = self.send({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
         self.assertEqual(response["error"]["code"], SERVER_NOT_INITIALIZED)
 
-    def test_tools_list_exposes_nine_descriptive_schemas(self) -> None:
+    def test_tools_list_exposes_twelve_descriptive_schemas(self) -> None:
         self.make_ready()
         response = self.send(
             {"jsonrpc": "2.0", "id": 3, "method": "tools/list", "params": {}}
         )
         tools = response["result"]["tools"]
-        self.assertEqual(len(tools), 9)
+        self.assertEqual(len(tools), 12)
         self.assertEqual(
             {tool["name"] for tool in tools},
             {
@@ -129,9 +129,12 @@ class MCPServerTests(unittest.TestCase):
                 "get_product_movements",
                 "get_inactive_products",
                 "get_product_movement_ranking",
+                "list_products",
                 "add_product",
                 "record_inventory_entry",
                 "record_inventory_exit",
+                "update_product",
+                "adjust_inventory",
             },
         )
         for tool in tools:
@@ -325,6 +328,153 @@ class MCPServerTests(unittest.TestCase):
                 )
                 self.assertEqual(response["error"]["code"], INVALID_PARAMS)
 
+    def test_list_products_combines_filters_and_can_return_zero_results(self) -> None:
+        self.make_ready()
+        response = self.call_tool(
+            "list_products",
+            {
+                "category": "Electronics",
+                "min_stock": 1,
+                "max_stock": 20,
+                "min_price": 20,
+                "max_price": 100,
+                "search": "key",
+                "limit": 10,
+            },
+        )
+        payload = response["result"]["structuredContent"]
+        self.assertEqual(payload["count"], 1)
+        self.assertEqual(payload["products"][0]["sku"], "ELEC-002")
+        empty = self.call_tool(
+            "list_products", {"category": "No such category"}
+        )["result"]["structuredContent"]
+        self.assertEqual(empty, {"count": 0, "products": []})
+
+    def test_list_products_rejects_invalid_ranges_and_limit(self) -> None:
+        self.make_ready()
+        for arguments in (
+            {"min_stock": 10, "max_stock": 5},
+            {"min_price": 20, "max_price": 10},
+            {"limit": 0},
+            {"limit": 101},
+        ):
+            with self.subTest(arguments=arguments):
+                response = self.call_tool("list_products", arguments)
+                self.assertEqual(response["error"]["code"], INVALID_PARAMS)
+
+    def test_update_product_tool_returns_before_and_after_values(self) -> None:
+        self.make_ready()
+        self.call_tool(
+            "add_product",
+            {
+                "sku": "MCP-UPDATE-001",
+                "name": "Update test product",
+                "category": "MCP Test",
+                "initial_stock": 9,
+                "minimum_stock": 2,
+                "target_stock": 12,
+                "unit_price": 10,
+            },
+        )
+        payload = self.call_tool(
+            "update_product",
+            {
+                "sku": "MCP-UPDATE-001",
+                "new_name": "Updated test product",
+                "category": "Updated category",
+                "minimum_stock": 5,
+                "target_stock": 20,
+                "unit_price": 19.95,
+            },
+        )["result"]["structuredContent"]
+        self.assertEqual(payload["previous_values"]["minimum_stock"], 2)
+        self.assertEqual(payload["new_values"]["minimum_stock"], 5)
+        self.assertEqual(payload["product"]["current_stock"], 9)
+        self.assertEqual(payload["product"]["sku"], "MCP-UPDATE-001")
+        self.assertEqual(
+            set(payload["changed_fields"]),
+            {"name", "category", "minimum_stock", "target_stock", "unit_price"},
+        )
+
+    def test_update_product_rejects_missing_fields_stock_and_invalid_result(self) -> None:
+        self.make_ready()
+        for arguments in (
+            {"sku": "ELEC-001"},
+            {"sku": "ELEC-001", "current_stock": 10},
+            {"sku": "ELEC-003", "minimum_stock": 40},
+            {"sku": "ELEC-003", "unit_price": -1},
+        ):
+            with self.subTest(arguments=arguments):
+                response = self.call_tool("update_product", arguments)
+                self.assertEqual(response["error"]["code"], INVALID_PARAMS)
+        missing = self.call_tool(
+            "update_product", {"sku": "NOT-FOUND", "category": "Other"}
+        )["result"]
+        self.assertTrue(missing["isError"])
+        self.assertEqual(
+            missing["structuredContent"]["error"]["type"], "PRODUCT_NOT_FOUND"
+        )
+
+    def test_adjust_inventory_tool_handles_in_out_and_no_change(self) -> None:
+        self.make_ready()
+        self.call_tool(
+            "add_product",
+            {
+                "sku": "MCP-COUNT-001",
+                "name": "Count test product",
+                "category": "MCP Test",
+                "initial_stock": 10,
+                "minimum_stock": 2,
+                "target_stock": 20,
+                "unit_price": 5,
+            },
+        )
+        adjusted_in = self.call_tool(
+            "adjust_inventory",
+            {
+                "sku": "MCP-COUNT-001",
+                "counted_stock": 14,
+                "reason": "Physical count",
+                "reference": "MCP-COUNT-IN-001",
+            },
+        )["result"]["structuredContent"]
+        self.assertEqual(adjusted_in["difference"], 4)
+        self.assertEqual(adjusted_in["adjustment_type"], "ADJUSTMENT_IN")
+        self.assertEqual(adjusted_in["movement"]["quantity"], 4)
+
+        adjusted_out = self.call_tool(
+            "adjust_inventory",
+            {
+                "sku": "MCP-COUNT-001",
+                "counted_stock": 8,
+                "reference": "MCP-COUNT-OUT-001",
+            },
+        )["result"]["structuredContent"]
+        self.assertEqual(adjusted_out["difference"], -6)
+        self.assertEqual(adjusted_out["adjustment_type"], "ADJUSTMENT_OUT")
+        self.assertEqual(adjusted_out["resulting_stock"], 8)
+
+        unchanged = self.call_tool(
+            "adjust_inventory", {"sku": "MCP-COUNT-001", "counted_stock": 8}
+        )["result"]["structuredContent"]
+        self.assertEqual(unchanged["difference"], 0)
+        self.assertIsNone(unchanged["adjustment_type"])
+        self.assertIsNone(unchanged["movement"])
+
+    def test_adjust_inventory_rejects_invalid_or_missing_product(self) -> None:
+        self.make_ready()
+        invalid = self.call_tool(
+            "adjust_inventory", {"sku": "ELEC-001", "counted_stock": -1}
+        )
+        self.assertEqual(invalid["error"]["code"], INVALID_PARAMS)
+        missing = self.call_tool(
+            "adjust_inventory", {"sku": "NOT-FOUND", "counted_stock": 1}
+        )["result"]
+        self.assertTrue(missing["isError"])
+        self.assertEqual(
+            missing["structuredContent"]["error"]["type"], "PRODUCT_NOT_FOUND"
+        )
+
     def test_unknown_tool_is_protocol_error(self) -> None:
         self.make_ready()
         response = self.call_tool("run_sql", {"query": "SELECT * FROM products"})
@@ -373,6 +523,31 @@ class MCPServerTests(unittest.TestCase):
         self.assertEqual(records[1]["direction"], "server -> client")
         self.assertEqual(records[1]["method"], "ping")
         self.assertEqual(records[1]["request_id"], 88)
+
+    def test_new_tool_calls_are_logged_by_name(self) -> None:
+        self.make_ready()
+        self.call_tool("list_products", {"category": "Electronics", "limit": 1})
+        self.call_tool(
+            "update_product",
+            {"sku": "ELEC-003", "target_stock": 30},
+        )
+        self.call_tool(
+            "adjust_inventory",
+            {"sku": "ELEC-003", "counted_stock": 10},
+        )
+        records = [
+            json.loads(line) for line in self.log_stream.getvalue().splitlines()
+        ]
+        tool_names = [
+            record["message"]["params"]["name"]
+            for record in records
+            if record["direction"] == "client -> server"
+            and record["method"] == "tools/call"
+        ]
+        self.assertEqual(
+            tool_names,
+            ["list_products", "update_product", "adjust_inventory"],
+        )
 
     def test_invalid_notification_does_not_produce_a_response(self) -> None:
         response = self.server.handle_line(

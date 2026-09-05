@@ -14,10 +14,12 @@ from inventory_assistant.inventory.exceptions import (
     ProductNotFoundError,
 )
 from inventory_assistant.inventory.models import (
+    InventoryAdjustmentResult,
     InventoryMovement,
     MovementType,
     Product,
     ProductCreation,
+    ProductUpdateResult,
     RankingDirection,
     RankingMetric,
     StockStatus,
@@ -34,6 +36,7 @@ def make_product(
     minimum: int,
     target: int,
     category: str = "Test",
+    unit_price_cents: int = 1000,
 ) -> Product:
     return Product(
         id=product_id,
@@ -43,7 +46,7 @@ def make_product(
         current_stock=stock,
         minimum_stock=minimum,
         target_stock=target,
-        unit_price_cents=1000,
+        unit_price_cents=unit_price_cents,
         created_at="2026-01-01T12:00:00+00:00",
         updated_at="2026-01-01T12:00:00+00:00",
     )
@@ -92,14 +95,32 @@ class FakeInventoryRepository:
             None,
         )
 
-    def list_products(self, category: str | None = None) -> list[Product]:
-        if category is None:
-            return list(self.products)
-        return [
+    def list_products(
+        self,
+        category: str | None = None,
+        *,
+        min_stock: int | None = None,
+        max_stock: int | None = None,
+        min_price_cents: int | None = None,
+        max_price_cents: int | None = None,
+        search: str | None = None,
+        limit: int | None = None,
+    ) -> list[Product]:
+        products = [
             item
             for item in self.products
-            if item.category.casefold() == category.casefold()
+            if (category is None or item.category.casefold() == category.casefold())
+            and (min_stock is None or item.current_stock >= min_stock)
+            and (max_stock is None or item.current_stock <= max_stock)
+            and (min_price_cents is None or item.unit_price_cents >= min_price_cents)
+            and (max_price_cents is None or item.unit_price_cents <= max_price_cents)
+            and (
+                search is None
+                or search.casefold() in item.sku.casefold()
+                or search.casefold() in item.name.casefold()
+            )
         ]
+        return products[:limit]
 
     def list_movements(
         self,
@@ -196,16 +217,96 @@ class FakeInventoryRepository:
             movement=movement,
         )
 
+    def update_product(
+        self,
+        *,
+        product_id: int,
+        name: str,
+        category: str,
+        minimum_stock: int,
+        target_stock: int,
+        unit_price_cents: int,
+    ) -> ProductUpdateResult:
+        previous = self.get_product_by_id(product_id)
+        if previous is None:
+            raise ProductNotFoundError("product not found")
+        updated = replace(
+            previous,
+            name=name,
+            category=category,
+            minimum_stock=minimum_stock,
+            target_stock=target_stock,
+            unit_price_cents=unit_price_cents,
+        )
+        self.products[self.products.index(previous)] = updated
+        fields = tuple(
+            field
+            for field, attribute in (
+                ("name", "name"),
+                ("category", "category"),
+                ("minimum_stock", "minimum_stock"),
+                ("target_stock", "target_stock"),
+                ("unit_price", "unit_price_cents"),
+            )
+            if getattr(previous, attribute) != getattr(updated, attribute)
+        )
+        return ProductUpdateResult(previous, updated, fields)
+
+    def adjust_inventory(
+        self,
+        *,
+        product_id: int,
+        counted_stock: int,
+        movement_date: date,
+        reason: str | None,
+        reference: str | None,
+    ) -> InventoryAdjustmentResult:
+        previous = self.get_product_by_id(product_id)
+        if previous is None:
+            raise ProductNotFoundError("product not found")
+        difference = counted_stock - previous.current_stock
+        updated = replace(previous, current_stock=counted_stock)
+        movement = None
+        movement_type = None
+        if difference:
+            movement_type = (
+                MovementType.ADJUSTMENT_IN
+                if difference > 0
+                else MovementType.ADJUSTMENT_OUT
+            )
+            movement = InventoryMovement(
+                id=len(self.movements) + 1,
+                product_id=product_id,
+                movement_type=movement_type,
+                quantity=abs(difference),
+                movement_date=movement_date,
+                reason=reason,
+                reference=reference,
+                created_at="2026-09-05T12:00:00+00:00",
+            )
+            self.movements.append(movement)
+            self.products[self.products.index(previous)] = updated
+        return InventoryAdjustmentResult(
+            product=updated,
+            previous_stock=previous.current_stock,
+            counted_stock=counted_stock,
+            difference=difference,
+            adjustment_type=movement_type,
+            movement=movement,
+        )
+
 
 class InventoryServiceTests(unittest.TestCase):
     def setUp(self) -> None:
         self.products = [
-            make_product(1, "OUT", "Empty", 0, 5, 20),
-            make_product(2, "LOW", "Low", 2, 5, 15),
-            make_product(3, "MIN", "At minimum", 5, 5, 15),
-            make_product(4, "OK", "Normal", 8, 5, 15),
-            make_product(5, "HIGH", "Excess", 20, 5, 15),
-            make_product(6, "NEVER", "Never moved", 7, 2, 10, "Other"),
+            make_product(1, "OUT", "Empty", 0, 5, 20, unit_price_cents=500),
+            make_product(2, "LOW", "Low", 2, 5, 15, unit_price_cents=1500),
+            make_product(3, "MIN", "At minimum", 5, 5, 15, unit_price_cents=2500),
+            make_product(4, "OK", "Normal", 8, 5, 15, unit_price_cents=5000),
+            make_product(5, "HIGH", "Excess", 20, 5, 15, unit_price_cents=10000),
+            make_product(
+                6, "NEVER", "Never moved", 7, 2, 10, "Other", 20000
+            ),
         ]
         self.movements = [
             make_movement(1, 1, MovementType.OUT, 5, date(2026, 8, 25)),
@@ -374,6 +475,123 @@ class InventoryServiceTests(unittest.TestCase):
         with self.assertRaises(InsufficientStockError):
             self.service.record_inventory_exit(sku="LOW", quantity=3)
         self.assertEqual(self.service.get_product_stock(sku="LOW").product.current_stock, 2)
+
+    def test_lists_products_with_combined_filters(self) -> None:
+        self.assertEqual(len(self.service.list_products()), 6)
+        self.assertEqual(
+            [item.sku for item in self.service.list_products(category="Other")],
+            ["NEVER"],
+        )
+        self.assertEqual(
+            {item.sku for item in self.service.list_products(min_stock=5, max_stock=8)},
+            {"MIN", "OK", "NEVER"},
+        )
+        self.assertEqual(
+            {item.sku for item in self.service.list_products(min_price=20, max_price=60)},
+            {"MIN", "OK"},
+        )
+        self.assertEqual(
+            [
+                item.sku
+                for item in self.service.list_products(
+                    category="Test",
+                    min_stock=5,
+                    max_stock=8,
+                    min_price=20,
+                    max_price=60,
+                    search="minimum",
+                )
+            ],
+            ["MIN"],
+        )
+        self.assertEqual(self.service.list_products(search="not-present"), [])
+
+    def test_list_products_rejects_invalid_ranges_and_limits(self) -> None:
+        invalid_arguments = (
+            {"min_stock": -1},
+            {"min_stock": 5, "max_stock": 4},
+            {"min_price": -1},
+            {"min_price": 10, "max_price": 9},
+            {"limit": 0},
+            {"limit": 101},
+        )
+        for arguments in invalid_arguments:
+            with self.subTest(arguments=arguments), self.assertRaises(
+                InvalidInventoryQueryError
+            ):
+                self.service.list_products(**arguments)
+
+    def test_updates_one_or_multiple_administrative_fields(self) -> None:
+        one_field = self.service.update_product(sku="LOW", minimum_stock=1)
+        self.assertEqual(one_field.previous_product.minimum_stock, 5)
+        self.assertEqual(one_field.product.minimum_stock, 1)
+        self.assertEqual(one_field.changed_fields, ("minimum_stock",))
+
+        multiple = self.service.update_product(
+            sku="LOW",
+            new_name="Low stock item",
+            category="Updated",
+            minimum_stock=3,
+            target_stock=25,
+            unit_price="19.95",
+        )
+        self.assertEqual(multiple.product.name, "Low stock item")
+        self.assertEqual(multiple.product.category, "Updated")
+        self.assertEqual(multiple.product.minimum_stock, 3)
+        self.assertEqual(multiple.product.target_stock, 25)
+        self.assertEqual(multiple.product.unit_price_cents, 1995)
+        self.assertEqual(multiple.product.current_stock, 2)
+        self.assertEqual(multiple.product.sku, "LOW")
+
+    def test_update_product_validates_complete_result(self) -> None:
+        invalid_arguments = (
+            {},
+            {"minimum_stock": -1},
+            {"minimum_stock": 20},
+            {"target_stock": 4},
+            {"unit_price": -1},
+            {"new_name": " "},
+        )
+        for updates in invalid_arguments:
+            with self.subTest(updates=updates), self.assertRaises(
+                InvalidInventoryQueryError
+            ):
+                self.service.update_product(sku="LOW", **updates)
+        with self.assertRaises(ProductNotFoundError):
+            self.service.update_product(sku="UNKNOWN", category="Test")
+
+    def test_adjusts_inventory_in_out_or_not_at_all(self) -> None:
+        adjustment_in = self.service.adjust_inventory(
+            sku="LOW", counted_stock=6, reason="Physical count"
+        )
+        self.assertEqual(adjustment_in.previous_stock, 2)
+        self.assertEqual(adjustment_in.difference, 4)
+        self.assertEqual(adjustment_in.adjustment_type, MovementType.ADJUSTMENT_IN)
+        self.assertEqual(adjustment_in.movement.quantity, 4)
+        self.assertEqual(adjustment_in.resulting_stock, 6)
+
+        adjustment_out = self.service.adjust_inventory(sku="LOW", counted_stock=1)
+        self.assertEqual(adjustment_out.difference, -5)
+        self.assertEqual(adjustment_out.adjustment_type, MovementType.ADJUSTMENT_OUT)
+        self.assertEqual(adjustment_out.movement.quantity, 5)
+        self.assertEqual(adjustment_out.resulting_stock, 1)
+
+        movement_count = len(self.movements)
+        unchanged = self.service.adjust_inventory(sku="LOW", counted_stock=1)
+        self.assertEqual(unchanged.difference, 0)
+        self.assertIsNone(unchanged.adjustment_type)
+        self.assertIsNone(unchanged.movement)
+        self.assertEqual(len(self.movements), movement_count)
+
+    def test_adjust_inventory_rejects_invalid_arguments(self) -> None:
+        with self.assertRaises(InvalidInventoryQueryError):
+            self.service.adjust_inventory(sku="LOW", counted_stock=-1)
+        with self.assertRaises(InvalidInventoryQueryError):
+            self.service.adjust_inventory(
+                sku="LOW", counted_stock=2, reason="x" * 201
+            )
+        with self.assertRaises(ProductNotFoundError):
+            self.service.adjust_inventory(sku="UNKNOWN", counted_stock=2)
 
 
 if __name__ == "__main__":

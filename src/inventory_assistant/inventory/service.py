@@ -13,12 +13,14 @@ from .exceptions import (
     ProductNotFoundError,
 )
 from .models import (
+    InventoryAdjustmentResult,
     InventoryMovement,
     MovementRanking,
     MovementType,
     Product,
     ProductActivity,
     ProductCreation,
+    ProductUpdateResult,
     ProductStock,
     RankingDirection,
     RankingMetric,
@@ -123,6 +125,131 @@ class InventoryService:
             reason=reason,
             reference=reference,
             movement_date=movement_date,
+        )
+
+    def list_products(
+        self,
+        *,
+        category: str | None = None,
+        min_stock: int | None = None,
+        max_stock: int | None = None,
+        min_price: Decimal | int | float | str | None = None,
+        max_price: Decimal | int | float | str | None = None,
+        search: str | None = None,
+        limit: int = 100,
+    ) -> list[Product]:
+        self._validate_limit(limit)
+        self._optional_non_negative_integer(min_stock, "min_stock")
+        self._optional_non_negative_integer(max_stock, "max_stock")
+        if min_stock is not None and max_stock is not None and min_stock > max_stock:
+            raise InvalidInventoryQueryError(
+                "min_stock cannot be greater than max_stock"
+            )
+        min_price_cents = (
+            self._price_to_cents(min_price) if min_price is not None else None
+        )
+        max_price_cents = (
+            self._price_to_cents(max_price) if max_price is not None else None
+        )
+        if (
+            min_price_cents is not None
+            and max_price_cents is not None
+            and min_price_cents > max_price_cents
+        ):
+            raise InvalidInventoryQueryError(
+                "min_price cannot be greater than max_price"
+            )
+        return self._repository.list_products(
+            self._optional_text(category, "category", maximum=200),
+            min_stock=min_stock,
+            max_stock=max_stock,
+            min_price_cents=min_price_cents,
+            max_price_cents=max_price_cents,
+            search=self._optional_text(search, "search", maximum=200),
+            limit=limit,
+        )
+
+    def update_product(
+        self,
+        *,
+        product_id: int | None = None,
+        sku: str | None = None,
+        name: str | None = None,
+        new_name: str | None = None,
+        category: str | None = None,
+        minimum_stock: int | None = None,
+        target_stock: int | None = None,
+        unit_price: Decimal | int | float | str | None = None,
+    ) -> ProductUpdateResult:
+        updates_provided = (
+            new_name is not None,
+            category is not None,
+            minimum_stock is not None,
+            target_stock is not None,
+            unit_price is not None,
+        )
+        if not any(updates_provided):
+            raise InvalidInventoryQueryError(
+                "provide at least one product field to update"
+            )
+        product = self._resolve_product(product_id=product_id, sku=sku, name=name)
+        resulting_name = (
+            self._required_text(new_name, "new_name", maximum=200)
+            if new_name is not None
+            else product.name
+        )
+        resulting_category = (
+            self._required_text(category, "category", maximum=200)
+            if category is not None
+            else product.category
+        )
+        if minimum_stock is not None:
+            self._non_negative_integer(minimum_stock, "minimum_stock")
+        if target_stock is not None:
+            self._non_negative_integer(target_stock, "target_stock")
+        resulting_minimum = (
+            minimum_stock if minimum_stock is not None else product.minimum_stock
+        )
+        resulting_target = (
+            target_stock if target_stock is not None else product.target_stock
+        )
+        if resulting_target < resulting_minimum:
+            raise InvalidInventoryQueryError(
+                "target_stock must be greater than or equal to minimum_stock"
+            )
+        resulting_price_cents = (
+            self._price_to_cents(unit_price)
+            if unit_price is not None
+            else product.unit_price_cents
+        )
+        return self._repository.update_product(
+            product_id=product.id,
+            name=resulting_name,
+            category=resulting_category,
+            minimum_stock=resulting_minimum,
+            target_stock=resulting_target,
+            unit_price_cents=resulting_price_cents,
+        )
+
+    def adjust_inventory(
+        self,
+        *,
+        counted_stock: int,
+        product_id: int | None = None,
+        sku: str | None = None,
+        name: str | None = None,
+        reason: str | None = None,
+        reference: str | None = None,
+        movement_date: date | None = None,
+    ) -> InventoryAdjustmentResult:
+        self._non_negative_integer(counted_stock, "counted_stock")
+        product = self._resolve_product(product_id=product_id, sku=sku, name=name)
+        return self._repository.adjust_inventory(
+            product_id=product.id,
+            counted_stock=counted_stock,
+            movement_date=movement_date or date.today(),
+            reason=self._optional_text(reason, "reason", maximum=200),
+            reference=self._optional_text(reference, "reference", maximum=200),
         )
 
     def get_low_stock_products(
@@ -368,7 +495,11 @@ class InventoryService:
 
     @staticmethod
     def _validate_limit(limit: int, maximum: int = 100) -> None:
-        if not 1 <= limit <= maximum:
+        if (
+            not isinstance(limit, int)
+            or isinstance(limit, bool)
+            or not 1 <= limit <= maximum
+        ):
             raise InvalidInventoryQueryError(
                 f"limit must be between 1 and {maximum}"
             )
@@ -381,14 +512,38 @@ class InventoryService:
             raise InvalidInventoryQueryError("date_from cannot be after date_to")
 
     @staticmethod
-    def _required_text(value: str, name: str) -> str:
+    def _required_text(
+        value: str, name: str, *, maximum: int | None = None
+    ) -> str:
         if not isinstance(value, str) or not value.strip():
             raise InvalidInventoryQueryError(f"{name} cannot be empty")
-        return value.strip()
+        normalized = value.strip()
+        if maximum is not None and len(normalized) > maximum:
+            raise InvalidInventoryQueryError(
+                f"{name} must contain at most {maximum} characters"
+            )
+        return normalized
 
     @classmethod
-    def _optional_text(cls, value: str | None, name: str) -> str | None:
-        return None if value is None else cls._required_text(value, name)
+    def _optional_text(
+        cls,
+        value: str | None,
+        name: str,
+        *,
+        maximum: int | None = None,
+    ) -> str | None:
+        return (
+            None
+            if value is None
+            else cls._required_text(value, name, maximum=maximum)
+        )
+
+    @classmethod
+    def _optional_non_negative_integer(
+        cls, value: int | None, name: str
+    ) -> None:
+        if value is not None:
+            cls._non_negative_integer(value, name)
 
     @staticmethod
     def _non_negative_integer(value: int, name: str) -> None:
@@ -406,7 +561,7 @@ class InventoryService:
     def _price_to_cents(value: Decimal | int | float | str) -> int:
         try:
             price = Decimal(str(value))
-        except (InvalidOperation, ValueError) as error:
+        except (InvalidOperation, TypeError, ValueError) as error:
             raise InvalidInventoryQueryError(
                 "unit_price must be a non-negative number"
             ) from error

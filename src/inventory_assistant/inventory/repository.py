@@ -6,10 +6,12 @@ from datetime import date
 from typing import Protocol
 
 from .models import (
+    InventoryAdjustmentResult,
     InventoryMovement,
     MovementType,
     Product,
     ProductCreation,
+    ProductUpdateResult,
     StockMovementResult,
 )
 
@@ -23,7 +25,17 @@ class InventoryRepository(Protocol):
 
     def get_product_by_name(self, name: str) -> Product | None: ...
 
-    def list_products(self, category: str | None = None) -> list[Product]: ...
+    def list_products(
+        self,
+        category: str | None = None,
+        *,
+        min_stock: int | None = None,
+        max_stock: int | None = None,
+        min_price_cents: int | None = None,
+        max_price_cents: int | None = None,
+        search: str | None = None,
+        limit: int | None = None,
+    ) -> list[Product]: ...
 
     def list_movements(
         self,
@@ -57,3 +69,24 @@ class InventoryRepository(Protocol):
         reason: str | None,
         reference: str | None,
     ) -> StockMovementResult: ...
+
+    def update_product(
+        self,
+        *,
+        product_id: int,
+        name: str,
+        category: str,
+        minimum_stock: int,
+        target_stock: int,
+        unit_price_cents: int,
+    ) -> ProductUpdateResult: ...
+
+    def adjust_inventory(
+        self,
+        *,
+        product_id: int,
+        counted_stock: int,
+        movement_date: date,
+        reason: str | None,
+        reference: str | None,
+    ) -> InventoryAdjustmentResult: ...

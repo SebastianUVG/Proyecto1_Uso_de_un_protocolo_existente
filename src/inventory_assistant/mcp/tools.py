@@ -16,12 +16,14 @@ from inventory_assistant.inventory.exceptions import (
     ProductNotFoundError,
 )
 from inventory_assistant.inventory.models import (
+    InventoryAdjustmentResult,
     InventoryMovement,
     MovementRanking,
     MovementType,
     Product,
     ProductActivity,
     ProductStock,
+    ProductUpdateResult,
     RankingDirection,
     RankingMetric,
     RestockRecommendation,
@@ -209,6 +211,32 @@ TOOL_DEFINITIONS: tuple[dict[str, Any], ...] = (
         },
     },
     {
+        "name": "list_products",
+        "description": (
+            "List inventory products without modifying data. Combine optional exact "
+            "category, inclusive stock and unit-price ranges, or a partial name/SKU "
+            "search. Use this for product browsing rather than low-stock-only queries."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "category": {"type": "string", "minLength": 1, "maxLength": 200},
+                "min_stock": {"type": "integer", "minimum": 0},
+                "max_stock": {"type": "integer", "minimum": 0},
+                "min_price": {"type": "number", "minimum": 0},
+                "max_price": {"type": "number", "minimum": 0},
+                "search": {"type": "string", "minLength": 1, "maxLength": 200},
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 100,
+                    "default": 100,
+                },
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
         "name": "add_product",
         "description": (
             "Create one new inventory product. This modifies inventory data and must "
@@ -277,6 +305,59 @@ TOOL_DEFINITIONS: tuple[dict[str, Any], ...] = (
             "additionalProperties": False,
         },
     },
+    {
+        "name": "update_product",
+        "description": (
+            "Update administrative fields of one existing product. Select it with "
+            "exactly one of product_id, sku, or name, then provide at least one of "
+            "new_name, category, minimum_stock, target_stock, or unit_price. SKU, ID, "
+            "and current stock cannot be changed with this tool."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                **_product_selector_properties(),
+                "new_name": {"type": "string", "minLength": 1, "maxLength": 200},
+                "category": {"type": "string", "minLength": 1, "maxLength": 200},
+                "minimum_stock": {"type": "integer", "minimum": 0},
+                "target_stock": {"type": "integer", "minimum": 0},
+                "unit_price": {"type": "number", "minimum": 0},
+            },
+            "allOf": [
+                {"oneOf": _exactly_one_product_selector()},
+                {
+                    "anyOf": [
+                        {"required": ["new_name"]},
+                        {"required": ["category"]},
+                        {"required": ["minimum_stock"]},
+                        {"required": ["target_stock"]},
+                        {"required": ["unit_price"]},
+                    ]
+                },
+            ],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "adjust_inventory",
+        "description": (
+            "Set one product's stock to a non-negative physical counted_stock. The "
+            "server calculates the difference and atomically records ADJUSTMENT_IN "
+            "or ADJUSTMENT_OUT; no movement is created when the count is unchanged."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                **_product_selector_properties(),
+                "counted_stock": {"type": "integer", "minimum": 0},
+                "reason": {"type": "string", "minLength": 1, "maxLength": 200},
+                "reference": {"type": "string", "minLength": 1, "maxLength": 200},
+            },
+            "required": ["counted_stock"],
+            "oneOf": _exactly_one_product_selector(),
+            "additionalProperties": False,
+        },
+    },
 )
 
 
@@ -296,9 +377,12 @@ class InventoryToolDispatcher:
             "get_product_movements": self._get_product_movements,
             "get_inactive_products": self._get_inactive_products,
             "get_product_movement_ranking": self._get_product_movement_ranking,
+            "list_products": self._list_products,
             "add_product": self._add_product,
             "record_inventory_entry": self._record_inventory_entry,
             "record_inventory_exit": self._record_inventory_exit,
+            "update_product": self._update_product,
+            "adjust_inventory": self._adjust_inventory,
         }
 
     def list_tools(self) -> list[dict[str, Any]]:
@@ -403,6 +487,79 @@ class InventoryToolDispatcher:
             reference=_optional_string(arguments, "reference"),
         )
         return _stock_movement_result_payload(result)
+
+    def _list_products(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        _validate_keys(
+            arguments,
+            {
+                "category",
+                "min_stock",
+                "max_stock",
+                "min_price",
+                "max_price",
+                "search",
+                "limit",
+            },
+        )
+        products = self._service.list_products(
+            category=_optional_string(arguments, "category", maximum=200),
+            min_stock=_optional_int_or_none(arguments, "min_stock", minimum=0),
+            max_stock=_optional_int_or_none(arguments, "max_stock", minimum=0),
+            min_price=_optional_decimal(arguments, "min_price", minimum=Decimal(0)),
+            max_price=_optional_decimal(arguments, "max_price", minimum=Decimal(0)),
+            search=_optional_string(arguments, "search", maximum=200),
+            limit=_optional_int(arguments, "limit", 100, maximum=100),
+        )
+        return {
+            "count": len(products),
+            "products": [_product_payload(product) for product in products],
+        }
+
+    def _update_product(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        update_fields = {
+            "new_name",
+            "category",
+            "minimum_stock",
+            "target_stock",
+            "unit_price",
+        }
+        _validate_keys(
+            arguments,
+            {"product_id", "sku", "name", *update_fields},
+        )
+        if not update_fields.intersection(arguments):
+            raise ToolArgumentError("provide at least one product field to update")
+        selector = _parse_product_selector(arguments)
+        result = self._service.update_product(
+            **selector,
+            new_name=_optional_string(arguments, "new_name", maximum=200),
+            category=_optional_string(arguments, "category", maximum=200),
+            minimum_stock=_optional_int_or_none(
+                arguments, "minimum_stock", minimum=0
+            ),
+            target_stock=_optional_int_or_none(
+                arguments, "target_stock", minimum=0
+            ),
+            unit_price=_optional_decimal(
+                arguments, "unit_price", minimum=Decimal(0)
+            ),
+        )
+        return _product_update_result_payload(result)
+
+    def _adjust_inventory(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        _validate_keys(
+            arguments,
+            {"product_id", "sku", "name", "counted_stock", "reason", "reference"},
+            required={"counted_stock"},
+        )
+        selector = _parse_product_selector(arguments)
+        result = self._service.adjust_inventory(
+            **selector,
+            counted_stock=_required_int(arguments, "counted_stock", minimum=0),
+            reason=_optional_string(arguments, "reason", maximum=200),
+            reference=_optional_string(arguments, "reference", maximum=200),
+        )
+        return _inventory_adjustment_result_payload(result)
 
     def _get_product_stock(self, arguments: dict[str, Any]) -> dict[str, Any]:
         _validate_keys(arguments, {"product_id", "sku", "name"})
@@ -629,6 +786,49 @@ def _stock_movement_result_payload(result: StockMovementResult) -> dict[str, Any
     }
 
 
+def _product_update_result_payload(result: ProductUpdateResult) -> dict[str, Any]:
+    previous_values = _administrative_product_values(result.previous_product)
+    new_values = _administrative_product_values(result.product)
+    return {
+        "product": _product_payload(result.product),
+        "previous_values": previous_values,
+        "new_values": new_values,
+        "changed_fields": list(result.changed_fields),
+    }
+
+
+def _administrative_product_values(product: Product) -> dict[str, Any]:
+    return {
+        "name": product.name,
+        "category": product.category,
+        "minimum_stock": product.minimum_stock,
+        "target_stock": product.target_stock,
+        "unit_price": _decimal_text(product.unit_price),
+    }
+
+
+def _inventory_adjustment_result_payload(
+    result: InventoryAdjustmentResult,
+) -> dict[str, Any]:
+    return {
+        "product": _product_payload(result.product),
+        "previous_stock": result.previous_stock,
+        "counted_stock": result.counted_stock,
+        "difference": result.difference,
+        "adjustment_type": (
+            result.adjustment_type.value
+            if result.adjustment_type is not None
+            else None
+        ),
+        "movement": (
+            _movement_payload(result.movement)
+            if result.movement is not None
+            else None
+        ),
+        "resulting_stock": result.resulting_stock,
+    }
+
+
 def _decimal_text(value: Decimal) -> str:
     return format(value, ".2f")
 
@@ -661,17 +861,24 @@ def _parse_product_selector(arguments: dict[str, Any]) -> dict[str, Any]:
     return {key: _required_string(arguments, key)}
 
 
-def _required_string(arguments: dict[str, Any], key: str) -> str:
+def _required_string(
+    arguments: dict[str, Any], key: str, *, maximum: int | None = None
+) -> str:
     value = arguments.get(key)
     if not isinstance(value, str) or not value.strip():
         raise ToolArgumentError(f"{key} must be a non-empty string")
-    return value.strip()
+    normalized = value.strip()
+    if maximum is not None and len(normalized) > maximum:
+        raise ToolArgumentError(f"{key} must contain at most {maximum} characters")
+    return normalized
 
 
-def _optional_string(arguments: dict[str, Any], key: str) -> str | None:
+def _optional_string(
+    arguments: dict[str, Any], key: str, *, maximum: int | None = None
+) -> str | None:
     if key not in arguments:
         return None
-    return _required_string(arguments, key)
+    return _required_string(arguments, key, maximum=maximum)
 
 
 def _required_int(
@@ -704,6 +911,18 @@ def _optional_int(
     return _required_int(arguments, key, minimum=1, maximum=maximum)
 
 
+def _optional_int_or_none(
+    arguments: dict[str, Any],
+    key: str,
+    *,
+    minimum: int,
+    maximum: int | None = None,
+) -> int | None:
+    if key not in arguments:
+        return None
+    return _required_int(arguments, key, minimum=minimum, maximum=maximum)
+
+
 def _required_decimal(
     arguments: dict[str, Any], key: str, *, minimum: Decimal
 ) -> Decimal:
@@ -717,6 +936,14 @@ def _required_decimal(
     if not parsed.is_finite() or parsed < minimum:
         raise ToolArgumentError(f"{key} must be at least {minimum}")
     return parsed
+
+
+def _optional_decimal(
+    arguments: dict[str, Any], key: str, *, minimum: Decimal
+) -> Decimal | None:
+    if key not in arguments:
+        return None
+    return _required_decimal(arguments, key, minimum=minimum)
 
 
 def _optional_bool(arguments: dict[str, Any], key: str, default: bool) -> bool:

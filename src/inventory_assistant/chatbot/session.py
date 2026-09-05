@@ -28,7 +28,13 @@ Preserve conversational context and use it to understand follow-up references. D
 not claim that an operation succeeded when a tool result reports an error."""
 
 MUTATING_INVENTORY_TOOLS = frozenset(
-    {"add_product", "record_inventory_entry", "record_inventory_exit"}
+    {
+        "add_product",
+        "record_inventory_entry",
+        "record_inventory_exit",
+        "update_product",
+        "adjust_inventory",
+    }
 )
 _CONFIRMATION_YES = frozenset({"yes", "y", "confirm", "confirmed", "si", "sí"})
 _CONFIRMATION_NO = frozenset({"no", "n", "cancel", "cancelled", "cancelar"})
@@ -265,4 +271,15 @@ def _describe_mutation(request: ToolUseBlock) -> str:
         return f"This will add {quantity} units to {selector}."
     if name == "record_inventory_exit":
         return f"This will remove {quantity} units from {selector}."
+    if name == "update_product":
+        updates = [
+            f"{key} -> {value}"
+            for key, value in arguments.items()
+            if key not in {"product_id", "sku", "name"}
+        ]
+        details = ", ".join(updates) or "the requested administrative fields"
+        return f"This will update {selector}: {details}."
+    if name == "adjust_inventory":
+        counted_stock = arguments.get("counted_stock", "unknown")
+        return f"This will set {selector} to a physical count of {counted_stock} units."
     return f"This will execute the pending inventory operation {request.name}."

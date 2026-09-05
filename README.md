@@ -121,7 +121,7 @@ The demonstration launches the real server as a subprocess and shows the message
 python scripts/demo_mcp_stdio.py
 ```
 
-It performs `initialize`, sends `notifications/initialized`, discovers the nine tools with `tools/list`, and calls `get_low_stock_products`. The final section displays the server logs captured separately from protocol output.
+It performs `initialize`, sends `notifications/initialized`, discovers the twelve tools with `tools/list`, and calls `get_low_stock_products`. The final section displays the server logs captured separately from protocol output.
 
 Exposed inventory tools:
 
@@ -131,11 +131,20 @@ Exposed inventory tools:
 - `get_product_movements`
 - `get_inactive_products`
 - `get_product_movement_ranking`
+- `list_products`
 - `add_product`
 - `record_inventory_entry`
 - `record_inventory_exit`
+- `update_product`
+- `adjust_inventory`
 
-The three write tools are executed only after host-side user confirmation. Positive initial stock is stored as an `IN` movement named `Initial stock` in the same SQLite transaction that creates the product. Entries and exits also create their movement and update `current_stock` in one transaction; any failure rolls back both changes.
+The five write tools are executed only after host-side user confirmation. `list_products` is read-only and combines optional category, stock range, price range, partial name/SKU search, and limit filters. All filter values are passed to parameterized SQLite queries.
+
+`update_product` changes only administrative fields: `new_name`, `category`, `minimum_stock`, `target_stock`, and `unit_price`. `new_name` is used because `name` remains available as a product selector. SKU, ID, and `current_stock` are intentionally immutable through this operation; stock changes must remain auditable.
+
+`adjust_inventory` receives a physical `counted_stock`, calculates its difference from the stored stock, and creates either `ADJUSTMENT_IN` or `ADJUSTMENT_OUT`. An equal count returns a no-change result without creating a movement. Movement creation and stock update share one SQLite transaction, so a failure rolls back both.
+
+Positive initial stock is stored as an `IN` movement named `Initial stock` in the same SQLite transaction that creates the product. Regular entries and exits also create their movement and update `current_stock` in one transaction.
 
 ## Configure multiple local MCP servers
 
@@ -323,7 +332,7 @@ MCP logs are stored separately from normal conversational output. Each entry con
 python -m unittest discover -s tests -v
 ```
 
-The suite covers the domain service, SQLite integration, JSON-RPC, MCP lifecycle, all nine inventory tools, the real local MCP client and subprocess, request correlation, timeouts, multi-server registration, discovery, duplicate tool names, routing, disconnection, clean shutdown, write confirmations and cancellations, tool-use loops, multiple tool calls, context, OpenAI response conversion, and tool errors. It uses fake API clients and never consumes OpenAI API credits. Filesystem and Git tests use temporary or fake clients and never modify the main repository.
+The suite covers the domain service, SQLite integration, JSON-RPC, MCP lifecycle, all twelve inventory tools, filtered listings, administrative updates, physical inventory adjustments, transaction rollback, the real local MCP client and subprocess, request correlation, timeouts, multi-server registration, discovery, duplicate tool names, routing, disconnection, clean shutdown, write confirmations and cancellations, tool-use loops, multiple tool calls, context, OpenAI response conversion, and tool errors. It uses fake API clients and never consumes OpenAI API credits. Filesystem and Git tests use temporary or fake clients and never modify the main repository.
 
 ## Current architecture
 

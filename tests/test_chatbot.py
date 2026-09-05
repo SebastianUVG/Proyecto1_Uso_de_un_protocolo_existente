@@ -47,6 +47,39 @@ DISCOVERED_TOOLS = [
             "required": ["sku", "quantity"],
         },
     },
+    {
+        "name": "inventory__list_products",
+        "description": "List and filter inventory products without modifying data.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "category": {"type": "string"},
+                "max_stock": {"type": "integer"},
+            },
+        },
+    },
+    {
+        "name": "inventory__update_product",
+        "description": "Update administrative product information.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "sku": {"type": "string"},
+                "target_stock": {"type": "integer"},
+            },
+        },
+    },
+    {
+        "name": "inventory__adjust_inventory",
+        "description": "Set stock to a physical inventory count.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "sku": {"type": "string"},
+                "counted_stock": {"type": "integer"},
+            },
+        },
+    },
 ]
 
 
@@ -92,6 +125,31 @@ class FakeMCPClient:
                     "quantity": 20,
                     "previous_stock": 0,
                     "new_stock": 20,
+                },
+            },
+            "inventory__list_products": {
+                "isError": False,
+                "structuredContent": {
+                    "count": 1,
+                    "products": [{"sku": "ELEC-002", "current_stock": 3}],
+                },
+            },
+            "inventory__update_product": {
+                "isError": False,
+                "structuredContent": {
+                    "product": {"sku": "ELEC-002", "target_stock": 30},
+                    "changed_fields": ["target_stock"],
+                },
+            },
+            "inventory__adjust_inventory": {
+                "isError": False,
+                "structuredContent": {
+                    "product": {"sku": "ELEC-002", "current_stock": 12},
+                    "previous_stock": 3,
+                    "counted_stock": 12,
+                    "difference": 9,
+                    "adjustment_type": "ADJUSTMENT_IN",
+                    "resulting_stock": 12,
                 },
             },
         }
@@ -242,6 +300,9 @@ class ChatbotSessionTests(unittest.TestCase):
                 "get_low_stock_products",
                 "get_product_stock",
                 "inventory__record_inventory_entry",
+                "inventory__list_products",
+                "inventory__update_product",
+                "inventory__adjust_inventory",
             ],
         )
         self.assertEqual(
@@ -331,6 +392,100 @@ class ChatbotSessionTests(unittest.TestCase):
             session.pending_operation.requests[0].arguments,
             {"sku": "WARE-003", "quantity": 20},
         )
+
+    def test_list_products_is_read_only_and_runs_without_confirmation(self) -> None:
+        arguments = {"category": "Electronics", "max_stock": 20}
+        provider = ScriptedLLMProvider(
+            [
+                response(
+                    ToolUseBlock(
+                        "list-1", "inventory__list_products", arguments
+                    )
+                ),
+                response(TextBlock("One Electronics product matched.")),
+            ]
+        )
+        mcp = FakeMCPClient()
+        answer = ChatbotSession(provider, mcp).ask("Show filtered products")
+        self.assertEqual(answer, "One Electronics product matched.")
+        self.assertEqual(mcp.calls, [("inventory__list_products", arguments)])
+
+    def test_update_product_requires_confirmation_and_yes_executes_exact_call(self) -> None:
+        arguments = {"sku": "ELEC-002", "target_stock": 30}
+        provider = ScriptedLLMProvider(
+            [
+                response(
+                    ToolUseBlock(
+                        "update-1", "inventory__update_product", arguments
+                    )
+                ),
+                response(TextBlock("Target stock changed to 30.")),
+            ]
+        )
+        mcp = FakeMCPClient()
+        session = ChatbotSession(provider, mcp)
+        prompt = session.ask("Change its target stock")
+        self.assertIn("update ELEC-002", prompt)
+        self.assertIn("target_stock -> 30", prompt)
+        self.assertEqual(mcp.calls, [])
+        self.assertEqual(session.ask("yes"), "Target stock changed to 30.")
+        self.assertEqual(mcp.calls, [("inventory__update_product", arguments)])
+
+    def test_update_product_cancellation_discards_exact_call(self) -> None:
+        provider = ScriptedLLMProvider(
+            [
+                response(
+                    ToolUseBlock(
+                        "update-1",
+                        "inventory__update_product",
+                        {"sku": "ELEC-002", "target_stock": 30},
+                    )
+                )
+            ]
+        )
+        mcp = FakeMCPClient()
+        session = ChatbotSession(provider, mcp)
+        session.ask("Change target")
+        self.assertIn("cancelled", session.ask("no").casefold())
+        self.assertEqual(mcp.calls, [])
+
+    def test_adjust_inventory_requires_confirmation_and_yes_executes_exact_call(self) -> None:
+        arguments = {"sku": "ELEC-002", "counted_stock": 12}
+        provider = ScriptedLLMProvider(
+            [
+                response(
+                    ToolUseBlock(
+                        "adjust-1", "inventory__adjust_inventory", arguments
+                    )
+                ),
+                response(TextBlock("Physical count saved at 12 units.")),
+            ]
+        )
+        mcp = FakeMCPClient()
+        session = ChatbotSession(provider, mcp)
+        prompt = session.ask("We counted 12")
+        self.assertIn("physical count of 12", prompt)
+        self.assertEqual(mcp.calls, [])
+        self.assertEqual(session.ask("yes"), "Physical count saved at 12 units.")
+        self.assertEqual(mcp.calls, [("inventory__adjust_inventory", arguments)])
+
+    def test_adjust_inventory_cancellation_makes_no_mcp_call(self) -> None:
+        provider = ScriptedLLMProvider(
+            [
+                response(
+                    ToolUseBlock(
+                        "adjust-1",
+                        "inventory__adjust_inventory",
+                        {"sku": "ELEC-002", "counted_stock": 12},
+                    )
+                )
+            ]
+        )
+        mcp = FakeMCPClient()
+        session = ChatbotSession(provider, mcp)
+        session.ask("Adjust inventory")
+        session.ask("no")
+        self.assertEqual(mcp.calls, [])
 
 
 if __name__ == "__main__":

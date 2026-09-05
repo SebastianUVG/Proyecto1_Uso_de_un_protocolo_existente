@@ -11,6 +11,7 @@ from datetime import date
 from pathlib import Path
 from unittest.mock import patch
 
+from inventory_assistant.chatbot.session import ChatbotSession
 from inventory_assistant.config import DatabaseConfig
 from inventory_assistant.inventory.bootstrap import initialize_database
 from inventory_assistant.inventory.exceptions import (
@@ -26,6 +27,33 @@ from inventory_assistant.inventory.models import (
 from inventory_assistant.inventory.service import InventoryService
 from inventory_assistant.inventory.sqlite import SQLiteInventoryRepository
 from inventory_assistant.inventory.sqlite.seed import DEMO_REFERENCE_DATE
+from inventory_assistant.llm import LLMResponse, ToolUseBlock
+from inventory_assistant.mcp.tools import InventoryToolDispatcher
+
+
+class OneShotMutationProvider:
+    def __init__(self, tool_name: str, arguments: dict[str, object]) -> None:
+        self.tool_name = tool_name
+        self.arguments = arguments
+
+    def generate(self, messages, tools, *, system_prompt) -> LLMResponse:
+        return LLMResponse(
+            blocks=(ToolUseBlock("pending-1", self.tool_name, self.arguments),),
+            stop_reason="tool_use",
+        )
+
+
+class DispatcherClient:
+    def __init__(self, dispatcher: InventoryToolDispatcher) -> None:
+        self.dispatcher = dispatcher
+        self.calls: list[tuple[str, dict[str, object]]] = []
+
+    def list_tools(self, *, refresh: bool = False):
+        return self.dispatcher.list_tools()
+
+    def call_tool(self, name: str, arguments: dict[str, object]):
+        self.calls.append((name, arguments))
+        return self.dispatcher.call(name, arguments)
 
 
 class SQLiteIntegrationTests(unittest.TestCase):
@@ -278,6 +306,145 @@ class SQLiteIntegrationTests(unittest.TestCase):
             len(self.repository.list_movements(product_id=product.id)),
             movements_before,
         )
+
+    def test_list_products_combines_parameterized_filters(self) -> None:
+        products = self.service.list_products(
+            category="Electronics",
+            min_stock=1,
+            max_stock=20,
+            min_price=20,
+            max_price=100,
+            search="key",
+        )
+        self.assertEqual([product.sku for product in products], ["ELEC-002"])
+        self.assertEqual(self.service.list_products(search="missing-value"), [])
+
+    def test_update_product_persists_only_administrative_fields(self) -> None:
+        before = self.service.get_product_stock(sku="ELEC-003").product
+        result = self.service.update_product(
+            sku="ELEC-003",
+            new_name="Updated Keyboard",
+            category="Office Technology",
+            minimum_stock=6,
+            target_stock=30,
+            unit_price="99.50",
+        )
+        after = self.service.get_product_stock(product_id=before.id).product
+        self.assertEqual(result.previous_product, before)
+        self.assertEqual(after.name, "Updated Keyboard")
+        self.assertEqual(after.category, "Office Technology")
+        self.assertEqual(after.minimum_stock, 6)
+        self.assertEqual(after.target_stock, 30)
+        self.assertEqual(after.unit_price_cents, 9950)
+        self.assertEqual(after.current_stock, before.current_stock)
+        self.assertEqual(after.sku, before.sku)
+
+    def test_adjust_inventory_records_both_directions_and_skips_noop(self) -> None:
+        product = self.service.get_product_stock(sku="WARE-003").product
+        before_count = len(self.repository.list_movements(product_id=product.id))
+        adjustment_in = self.service.adjust_inventory(
+            sku="WARE-003",
+            counted_stock=12,
+            reason="Physical inventory count",
+            reference="COUNT-IN-001",
+            movement_date=date(2026, 9, 5),
+        )
+        self.assertEqual(adjustment_in.adjustment_type, MovementType.ADJUSTMENT_IN)
+        self.assertEqual(adjustment_in.difference, 12)
+        self.assertEqual(adjustment_in.movement.quantity, 12)
+        self.assertEqual(adjustment_in.resulting_stock, 12)
+
+        adjustment_out = self.service.adjust_inventory(
+            sku="WARE-003",
+            counted_stock=7,
+            reference="COUNT-OUT-001",
+            movement_date=date(2026, 9, 5),
+        )
+        self.assertEqual(adjustment_out.adjustment_type, MovementType.ADJUSTMENT_OUT)
+        self.assertEqual(adjustment_out.difference, -5)
+        self.assertEqual(adjustment_out.movement.quantity, 5)
+        self.assertEqual(adjustment_out.resulting_stock, 7)
+
+        no_change = self.service.adjust_inventory(
+            sku="WARE-003", counted_stock=7
+        )
+        self.assertEqual(no_change.difference, 0)
+        self.assertIsNone(no_change.movement)
+        movements = self.repository.list_movements(product_id=product.id)
+        self.assertEqual(len(movements), before_count + 2)
+        self.assertEqual(
+            {movements[0].movement_type, movements[1].movement_type},
+            {MovementType.ADJUSTMENT_IN, MovementType.ADJUSTMENT_OUT},
+        )
+        self.assertEqual(
+            self.service.get_product_stock(sku="WARE-003").product.current_stock,
+            7,
+        )
+
+    def test_adjustment_rolls_back_when_stock_update_fails(self) -> None:
+        product = self.service.get_product_stock(sku="OFF-001").product
+        movements_before = len(self.repository.list_movements(product_id=product.id))
+        with closing(sqlite3.connect(self.database_path)) as connection:
+            with connection:
+                connection.execute(
+                    f"""
+                    CREATE TRIGGER fail_adjustment_stock_update
+                    BEFORE UPDATE OF current_stock ON products
+                    WHEN NEW.id = {product.id}
+                    BEGIN
+                        SELECT RAISE(ABORT, 'forced adjustment update failure');
+                    END
+                    """
+                )
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.service.adjust_inventory(
+                sku="OFF-001",
+                counted_stock=product.current_stock + 5,
+                reason="Rollback test",
+                reference="ROLLBACK-ADJUSTMENT-001",
+            )
+        unchanged = self.service.get_product_stock(sku="OFF-001").product
+        self.assertEqual(unchanged.current_stock, product.current_stock)
+        self.assertEqual(
+            len(self.repository.list_movements(product_id=product.id)),
+            movements_before,
+        )
+
+    def test_cancelled_update_and_adjustment_leave_sqlite_unchanged(self) -> None:
+        dispatcher = InventoryToolDispatcher(self.service)
+        product_before = self.service.get_product_stock(sku="ELEC-002").product
+        movements_before = len(
+            self.repository.list_movements(product_id=product_before.id)
+        )
+
+        update_client = DispatcherClient(dispatcher)
+        update_session = ChatbotSession(
+            OneShotMutationProvider(
+                "update_product", {"sku": "ELEC-002", "target_stock": 40}
+            ),
+            update_client,
+        )
+        self.assertIn("Confirm?", update_session.ask("Update the product"))
+        update_session.ask("no")
+
+        adjust_client = DispatcherClient(dispatcher)
+        adjust_session = ChatbotSession(
+            OneShotMutationProvider(
+                "adjust_inventory", {"sku": "ELEC-002", "counted_stock": 99}
+            ),
+            adjust_client,
+        )
+        self.assertIn("Confirm?", adjust_session.ask("Adjust the stock"))
+        adjust_session.ask("no")
+
+        product_after = self.service.get_product_stock(sku="ELEC-002").product
+        self.assertEqual(product_after, product_before)
+        self.assertEqual(
+            len(self.repository.list_movements(product_id=product_before.id)),
+            movements_before,
+        )
+        self.assertEqual(update_client.calls, [])
+        self.assertEqual(adjust_client.calls, [])
 
 
 if __name__ == "__main__":
