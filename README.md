@@ -6,7 +6,7 @@ This repository contains the incremental implementation of a multi-server assist
 
 - Python 3.11 or newer
 - An OpenAI API key for the real chatbot
-- The official `openai` Python package, installed by the setup command below
+- The official `openai` Python package and `python-dotenv`, installed by the setup command below
 - Node.js and `npx` for the Filesystem MCP Server
 - Git and the external `mcp-server-git` Python package for the Git MCP Server
 
@@ -46,7 +46,7 @@ macOS or Linux example:
 export INVENTORY_DB_PATH="data/inventory.db"
 ```
 
-The `.env.example` file documents all available settings. The project does not automatically load `.env` files; set variables in the shell before running a command.
+The `.env.example` file documents all available settings. A local `.env` in the repository root is loaded automatically and is ignored by Git; variables already set in the shell take precedence.
 
 ## Create the demonstration database
 
@@ -121,7 +121,7 @@ The demonstration launches the real server as a subprocess and shows the message
 python scripts/demo_mcp_stdio.py
 ```
 
-It performs `initialize`, sends `notifications/initialized`, discovers the six tools with `tools/list`, and calls `get_low_stock_products`. The final section displays the server logs captured separately from protocol output.
+It performs `initialize`, sends `notifications/initialized`, discovers the nine tools with `tools/list`, and calls `get_low_stock_products`. The final section displays the server logs captured separately from protocol output.
 
 Exposed inventory tools:
 
@@ -131,6 +131,11 @@ Exposed inventory tools:
 - `get_product_movements`
 - `get_inactive_products`
 - `get_product_movement_ranking`
+- `add_product`
+- `record_inventory_entry`
+- `record_inventory_exit`
+
+The three write tools are executed only after host-side user confirmation. Positive initial stock is stored as an `IN` movement named `Initial stock` in the same SQLite transaction that creates the product. Entries and exits also create their movement and update `current_stock` in one transaction; any failure rolls back both changes.
 
 ## Configure multiple local MCP servers
 
@@ -318,7 +323,7 @@ MCP logs are stored separately from normal conversational output. Each entry con
 python -m unittest discover -s tests -v
 ```
 
-The suite covers the domain service, SQLite integration, JSON-RPC, MCP lifecycle, all six inventory tools, the real local MCP client and subprocess, request correlation, timeouts, multi-server registration, discovery, duplicate tool names, routing, disconnection, clean shutdown, tool-use loops, multiple tool calls, context, OpenAI response conversion, and tool errors. It uses fake API clients and never consumes OpenAI API credits. Filesystem and Git tests use temporary or fake clients and never modify the main repository.
+The suite covers the domain service, SQLite integration, JSON-RPC, MCP lifecycle, all nine inventory tools, the real local MCP client and subprocess, request correlation, timeouts, multi-server registration, discovery, duplicate tool names, routing, disconnection, clean shutdown, write confirmations and cancellations, tool-use loops, multiple tool calls, context, OpenAI response conversion, and tool errors. It uses fake API clients and never consumes OpenAI API credits. Filesystem and Git tests use temporary or fake clients and never modify the main repository.
 
 ## Current architecture
 

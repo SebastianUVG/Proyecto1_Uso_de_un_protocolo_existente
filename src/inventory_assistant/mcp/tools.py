@@ -4,10 +4,14 @@ from __future__ import annotations
 
 import json
 from datetime import date
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Any, Callable
 
 from inventory_assistant.inventory.exceptions import (
+    DuplicateMovementReferenceError,
+    DuplicateProductNameError,
+    DuplicateSKUError,
+    InsufficientStockError,
     InvalidInventoryQueryError,
     ProductNotFoundError,
 )
@@ -21,6 +25,7 @@ from inventory_assistant.inventory.models import (
     RankingDirection,
     RankingMetric,
     RestockRecommendation,
+    StockMovementResult,
 )
 from inventory_assistant.inventory.service import InventoryService
 
@@ -203,6 +208,75 @@ TOOL_DEFINITIONS: tuple[dict[str, Any], ...] = (
             "additionalProperties": False,
         },
     },
+    {
+        "name": "add_product",
+        "description": (
+            "Create one new inventory product. This modifies inventory data and must "
+            "not be used to update an existing product. A positive initial_stock is "
+            "recorded as an auditable IN movement."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "sku": {"type": "string", "minLength": 1},
+                "name": {"type": "string", "minLength": 1},
+                "category": {"type": "string", "minLength": 1},
+                "initial_stock": {"type": "integer", "minimum": 0},
+                "minimum_stock": {"type": "integer", "minimum": 0},
+                "target_stock": {"type": "integer", "minimum": 0},
+                "unit_price": {"type": "number", "minimum": 0},
+            },
+            "required": [
+                "sku",
+                "name",
+                "category",
+                "initial_stock",
+                "minimum_stock",
+                "target_stock",
+                "unit_price",
+            ],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "record_inventory_entry",
+        "description": (
+            "Record receipt of a positive quantity for one existing product. This "
+            "creates an auditable IN movement and increases current stock atomically."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                **_product_selector_properties(),
+                "quantity": {"type": "integer", "minimum": 1},
+                "reason": {"type": "string", "minLength": 1},
+                "reference": {"type": "string", "minLength": 1},
+            },
+            "required": ["quantity"],
+            "oneOf": _exactly_one_product_selector(),
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "record_inventory_exit",
+        "description": (
+            "Record removal or sale of a positive quantity for one existing product. "
+            "This creates an auditable OUT movement and decreases current stock "
+            "atomically; it never permits negative stock."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                **_product_selector_properties(),
+                "quantity": {"type": "integer", "minimum": 1},
+                "reason": {"type": "string", "minLength": 1},
+                "reference": {"type": "string", "minLength": 1},
+            },
+            "required": ["quantity"],
+            "oneOf": _exactly_one_product_selector(),
+            "additionalProperties": False,
+        },
+    },
 )
 
 
@@ -222,6 +296,9 @@ class InventoryToolDispatcher:
             "get_product_movements": self._get_product_movements,
             "get_inactive_products": self._get_inactive_products,
             "get_product_movement_ranking": self._get_product_movement_ranking,
+            "add_product": self._add_product,
+            "record_inventory_entry": self._record_inventory_entry,
+            "record_inventory_exit": self._record_inventory_exit,
         }
 
     def list_tools(self) -> list[dict[str, Any]]:
@@ -260,7 +337,72 @@ class InventoryToolDispatcher:
             ) from error
         except ProductNotFoundError as error:
             return _tool_error("PRODUCT_NOT_FOUND", str(error))
+        except DuplicateSKUError as error:
+            return _tool_error("DUPLICATE_SKU", str(error))
+        except DuplicateProductNameError as error:
+            return _tool_error("DUPLICATE_PRODUCT_NAME", str(error))
+        except DuplicateMovementReferenceError as error:
+            return _tool_error("DUPLICATE_REFERENCE", str(error))
+        except InsufficientStockError as error:
+            return _tool_error("INSUFFICIENT_STOCK", str(error))
         return _tool_success(payload)
+
+    def _add_product(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        allowed = {
+            "sku",
+            "name",
+            "category",
+            "initial_stock",
+            "minimum_stock",
+            "target_stock",
+            "unit_price",
+        }
+        _validate_keys(arguments, allowed, required=allowed)
+        result = self._service.add_product(
+            sku=_required_string(arguments, "sku"),
+            name=_required_string(arguments, "name"),
+            category=_required_string(arguments, "category"),
+            initial_stock=_required_int(arguments, "initial_stock", minimum=0),
+            minimum_stock=_required_int(arguments, "minimum_stock", minimum=0),
+            target_stock=_required_int(arguments, "target_stock", minimum=0),
+            unit_price=_required_decimal(arguments, "unit_price", minimum=Decimal(0)),
+        )
+        return {
+            "product": _product_payload(result.product),
+            "initial_movement": (
+                _movement_payload(result.initial_movement)
+                if result.initial_movement is not None
+                else None
+            ),
+        }
+
+    def _record_inventory_entry(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        return self._record_inventory_change(arguments, is_entry=True)
+
+    def _record_inventory_exit(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        return self._record_inventory_change(arguments, is_entry=False)
+
+    def _record_inventory_change(
+        self, arguments: dict[str, Any], *, is_entry: bool
+    ) -> dict[str, Any]:
+        _validate_keys(
+            arguments,
+            {"product_id", "sku", "name", "quantity", "reason", "reference"},
+            required={"quantity"},
+        )
+        selector = _parse_product_selector(arguments)
+        operation = (
+            self._service.record_inventory_entry
+            if is_entry
+            else self._service.record_inventory_exit
+        )
+        result = operation(
+            **selector,
+            quantity=_required_int(arguments, "quantity", minimum=1),
+            reason=_optional_string(arguments, "reason"),
+            reference=_optional_string(arguments, "reference"),
+        )
+        return _stock_movement_result_payload(result)
 
     def _get_product_stock(self, arguments: dict[str, Any]) -> dict[str, Any]:
         _validate_keys(arguments, {"product_id", "sku", "name"})
@@ -477,6 +619,16 @@ def _ranking_payload(ranking: MovementRanking) -> dict[str, Any]:
     }
 
 
+def _stock_movement_result_payload(result: StockMovementResult) -> dict[str, Any]:
+    return {
+        "product": _product_payload(result.product),
+        "quantity": result.quantity,
+        "previous_stock": result.previous_stock,
+        "new_stock": result.new_stock,
+        "movement": _movement_payload(result.movement),
+    }
+
+
 def _decimal_text(value: Decimal) -> str:
     return format(value, ".2f")
 
@@ -552,6 +704,21 @@ def _optional_int(
     return _required_int(arguments, key, minimum=1, maximum=maximum)
 
 
+def _required_decimal(
+    arguments: dict[str, Any], key: str, *, minimum: Decimal
+) -> Decimal:
+    value = arguments.get(key)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ToolArgumentError(f"{key} must be a number")
+    try:
+        parsed = Decimal(str(value))
+    except InvalidOperation as error:
+        raise ToolArgumentError(f"{key} must be a number") from error
+    if not parsed.is_finite() or parsed < minimum:
+        raise ToolArgumentError(f"{key} must be at least {minimum}")
+    return parsed
+
+
 def _optional_bool(arguments: dict[str, Any], key: str, default: bool) -> bool:
     if key not in arguments:
         return default
@@ -591,4 +758,3 @@ def _optional_enum(
     except ValueError as error:
         allowed = ", ".join(item.value for item in enum_type)
         raise ToolArgumentError(f"{key} must be one of: {allowed}") from error
-

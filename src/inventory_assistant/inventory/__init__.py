@@ -6,11 +6,13 @@ from .models import (
     MovementType,
     Product,
     ProductActivity,
+    ProductCreation,
     ProductStock,
     RankingDirection,
     RankingMetric,
     RestockRecommendation,
     StockStatus,
+    StockMovementResult,
 )
 from .repository import InventoryRepository
 from .service import InventoryService
@@ -23,10 +25,11 @@ __all__ = [
     "MovementType",
     "Product",
     "ProductActivity",
+    "ProductCreation",
     "ProductStock",
     "RankingDirection",
     "RankingMetric",
     "RestockRecommendation",
     "StockStatus",
+    "StockMovementResult",
 ]
-

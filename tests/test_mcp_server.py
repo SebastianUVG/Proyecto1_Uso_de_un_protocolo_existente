@@ -113,13 +113,13 @@ class MCPServerTests(unittest.TestCase):
         response = self.send({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
         self.assertEqual(response["error"]["code"], SERVER_NOT_INITIALIZED)
 
-    def test_tools_list_exposes_six_descriptive_schemas(self) -> None:
+    def test_tools_list_exposes_nine_descriptive_schemas(self) -> None:
         self.make_ready()
         response = self.send(
             {"jsonrpc": "2.0", "id": 3, "method": "tools/list", "params": {}}
         )
         tools = response["result"]["tools"]
-        self.assertEqual(len(tools), 6)
+        self.assertEqual(len(tools), 9)
         self.assertEqual(
             {tool["name"] for tool in tools},
             {
@@ -129,6 +129,9 @@ class MCPServerTests(unittest.TestCase):
                 "get_product_movements",
                 "get_inactive_products",
                 "get_product_movement_ranking",
+                "add_product",
+                "record_inventory_entry",
+                "record_inventory_exit",
             },
         )
         for tool in tools:
@@ -207,6 +210,120 @@ class MCPServerTests(unittest.TestCase):
         ranking = response["result"]["structuredContent"]["products"]
         self.assertEqual(ranking[0]["product"]["sku"], "ELEC-002")
         self.assertEqual(ranking[0]["total_units"], 95)
+
+    def test_add_product_entry_and_exit_tools(self) -> None:
+        self.make_ready()
+        created = self.call_tool(
+            "add_product",
+            {
+                "sku": "MCP-LAP-005",
+                "name": "MCP Dell Latitude 5550",
+                "category": "Electronics",
+                "initial_stock": 10,
+                "minimum_stock": 5,
+                "target_stock": 15,
+                "unit_price": 850,
+            },
+        )["result"]
+        self.assertFalse(created["isError"])
+        self.assertEqual(created["structuredContent"]["product"]["current_stock"], 10)
+        self.assertEqual(
+            created["structuredContent"]["initial_movement"]["movement_type"],
+            "IN",
+        )
+
+        entry = self.call_tool(
+            "record_inventory_entry",
+            {
+                "sku": "MCP-LAP-005",
+                "quantity": 20,
+                "reason": "Supplier delivery",
+                "reference": "MCP-ENTRY-001",
+            },
+        )["result"]["structuredContent"]
+        self.assertEqual((entry["previous_stock"], entry["new_stock"]), (10, 30))
+        self.assertEqual(entry["movement"]["movement_type"], "IN")
+
+        exit_result = self.call_tool(
+            "record_inventory_exit",
+            {
+                "sku": "MCP-LAP-005",
+                "quantity": 4,
+                "reason": "Sale",
+                "reference": "MCP-EXIT-001",
+            },
+        )["result"]["structuredContent"]
+        self.assertEqual(
+            (exit_result["previous_stock"], exit_result["new_stock"]),
+            (30, 26),
+        )
+        self.assertEqual(exit_result["movement"]["movement_type"], "OUT")
+
+        records = [
+            json.loads(line) for line in self.log_stream.getvalue().splitlines()
+        ]
+        logged_tool_names = [
+            record["message"]["params"]["name"]
+            for record in records
+            if record["direction"] == "client -> server"
+            and record["method"] == "tools/call"
+        ]
+        self.assertEqual(
+            logged_tool_names,
+            [
+                "add_product",
+                "record_inventory_entry",
+                "record_inventory_exit",
+            ],
+        )
+
+    def test_write_tool_business_errors_are_structured_results(self) -> None:
+        self.make_ready()
+        duplicate = self.call_tool(
+            "add_product",
+            {
+                "sku": "ELEC-001",
+                "name": "Duplicate mouse",
+                "category": "Electronics",
+                "initial_stock": 0,
+                "minimum_stock": 0,
+                "target_stock": 1,
+                "unit_price": 1,
+            },
+        )["result"]
+        self.assertTrue(duplicate["isError"])
+        self.assertEqual(
+            duplicate["structuredContent"]["error"]["type"], "DUPLICATE_SKU"
+        )
+
+        insufficient = self.call_tool(
+            "record_inventory_exit",
+            {"sku": "ELEC-002", "quantity": 9999},
+        )["result"]
+        self.assertTrue(insufficient["isError"])
+        self.assertEqual(
+            insufficient["structuredContent"]["error"]["type"],
+            "INSUFFICIENT_STOCK",
+        )
+
+        missing = self.call_tool(
+            "record_inventory_entry",
+            {"sku": "DOES-NOT-EXIST", "quantity": 1},
+        )["result"]
+        self.assertTrue(missing["isError"])
+        self.assertEqual(
+            missing["structuredContent"]["error"]["type"], "PRODUCT_NOT_FOUND"
+        )
+
+    def test_write_tool_invalid_quantity_is_protocol_error(self) -> None:
+        self.make_ready()
+        for quantity in (0, -1):
+            with self.subTest(quantity=quantity):
+                response = self.call_tool(
+                    "record_inventory_entry",
+                    {"sku": "ELEC-001", "quantity": quantity},
+                )
+                self.assertEqual(response["error"]["code"], INVALID_PARAMS)
 
     def test_unknown_tool_is_protocol_error(self) -> None:
         self.make_ready()

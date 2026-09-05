@@ -3,15 +3,28 @@
 from __future__ import annotations
 
 import sqlite3
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 
-from ..models import InventoryMovement, MovementType, Product
+from ..exceptions import (
+    DuplicateMovementReferenceError,
+    DuplicateProductNameError,
+    DuplicateSKUError,
+    InsufficientStockError,
+    ProductNotFoundError,
+)
+from ..models import (
+    InventoryMovement,
+    MovementType,
+    Product,
+    ProductCreation,
+    StockMovementResult,
+)
 from .connection import SQLiteConnectionFactory
 
 
 class SQLiteInventoryRepository:
-    """Read inventory domain objects from SQLite using controlled queries."""
+    """Persist inventory domain objects with controlled SQLite transactions."""
 
     def __init__(self, database_path: Path) -> None:
         self._connections = SQLiteConnectionFactory(database_path)
@@ -67,12 +80,172 @@ class SQLiteInventoryRepository:
             rows = connection.execute(query, parameters).fetchall()
         return [self._movement_from_row(row) for row in rows]
 
+    def create_product(
+        self,
+        *,
+        sku: str,
+        name: str,
+        category: str,
+        initial_stock: int,
+        minimum_stock: int,
+        target_stock: int,
+        unit_price_cents: int,
+        movement_date: date,
+    ) -> ProductCreation:
+        timestamp = _utc_timestamp()
+        try:
+            with self._connections.connect() as connection:
+                with connection:
+                    cursor = connection.execute(
+                        """
+                        INSERT INTO products (
+                            sku, name, category, current_stock, minimum_stock,
+                            target_stock, unit_price_cents, created_at, updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            sku,
+                            name,
+                            category,
+                            initial_stock,
+                            minimum_stock,
+                            target_stock,
+                            unit_price_cents,
+                            timestamp,
+                            timestamp,
+                        ),
+                    )
+                    product_id = int(cursor.lastrowid)
+                    movement = None
+                    if initial_stock > 0:
+                        movement_cursor = connection.execute(
+                            """
+                            INSERT INTO inventory_movements (
+                                product_id, movement_type, quantity,
+                                movement_date, reason, reference, created_at
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            (
+                                product_id,
+                                MovementType.IN.value,
+                                initial_stock,
+                                movement_date.isoformat(),
+                                "Initial stock",
+                                f"INITIAL-STOCK-{product_id}",
+                                timestamp,
+                            ),
+                        )
+                        movement_row = connection.execute(
+                            "SELECT * FROM inventory_movements WHERE id = ?",
+                            (movement_cursor.lastrowid,),
+                        ).fetchone()
+                        movement = self._movement_from_row(movement_row)
+                    product_row = connection.execute(
+                        "SELECT * FROM products WHERE id = ?", (product_id,)
+                    ).fetchone()
+                    product = self._product_from_row(product_row)
+        except sqlite3.IntegrityError as error:
+            self._raise_integrity_error(error)
+        return ProductCreation(product=product, initial_movement=movement)
+
+    def record_stock_movement(
+        self,
+        *,
+        product_id: int,
+        movement_type: MovementType,
+        quantity: int,
+        movement_date: date,
+        reason: str | None,
+        reference: str | None,
+    ) -> StockMovementResult:
+        timestamp = _utc_timestamp()
+        try:
+            with self._connections.connect() as connection:
+                with connection:
+                    connection.execute("BEGIN IMMEDIATE")
+                    product_row = connection.execute(
+                        "SELECT * FROM products WHERE id = ?", (product_id,)
+                    ).fetchone()
+                    if product_row is None:
+                        raise ProductNotFoundError("product not found")
+                    previous_stock = int(product_row["current_stock"])
+                    incoming_types = {
+                        MovementType.IN,
+                        MovementType.ADJUSTMENT_IN,
+                    }
+                    delta = quantity if movement_type in incoming_types else -quantity
+                    new_stock = previous_stock + delta
+                    if new_stock < 0:
+                        raise InsufficientStockError(
+                            f"insufficient stock: available {previous_stock}, "
+                            f"requested {quantity}"
+                        )
+
+                    movement_cursor = connection.execute(
+                        """
+                        INSERT INTO inventory_movements (
+                            product_id, movement_type, quantity,
+                            movement_date, reason, reference, created_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            product_id,
+                            movement_type.value,
+                            quantity,
+                            movement_date.isoformat(),
+                            reason,
+                            reference,
+                            timestamp,
+                        ),
+                    )
+                    connection.execute(
+                        """
+                        UPDATE products
+                        SET current_stock = ?, updated_at = ?
+                        WHERE id = ?
+                        """,
+                        (new_stock, timestamp, product_id),
+                    )
+                    updated_row = connection.execute(
+                        "SELECT * FROM products WHERE id = ?", (product_id,)
+                    ).fetchone()
+                    movement_row = connection.execute(
+                        "SELECT * FROM inventory_movements WHERE id = ?",
+                        (movement_cursor.lastrowid,),
+                    ).fetchone()
+                    product = self._product_from_row(updated_row)
+                    movement = self._movement_from_row(movement_row)
+        except sqlite3.IntegrityError as error:
+            self._raise_integrity_error(error)
+        return StockMovementResult(
+            product=product,
+            quantity=quantity,
+            previous_stock=previous_stock,
+            new_stock=new_stock,
+            movement=movement,
+        )
+
     def _get_product(self, condition: str, value: object) -> Product | None:
         # The condition is supplied only by the three private, fixed query paths above.
         query = f"SELECT * FROM products WHERE {condition}"
         with self._connections.connect() as connection:
             row = connection.execute(query, (value,)).fetchone()
         return self._product_from_row(row) if row is not None else None
+
+    @staticmethod
+    def _raise_integrity_error(error: sqlite3.IntegrityError) -> None:
+        detail = str(error)
+        if "products.sku" in detail:
+            raise DuplicateSKUError("a product with this SKU already exists") from error
+        if "products.name" in detail:
+            raise DuplicateProductNameError(
+                "a product with this name already exists"
+            ) from error
+        if "inventory_movements.reference" in detail:
+            raise DuplicateMovementReferenceError(
+                "an inventory movement with this reference already exists"
+            ) from error
+        raise error
 
     @staticmethod
     def _product_from_row(row: sqlite3.Row) -> Product:
@@ -102,3 +275,6 @@ class SQLiteInventoryRepository:
             created_at=row["created_at"],
         )
 
+
+def _utc_timestamp() -> str:
+    return datetime.now(timezone.utc).isoformat()

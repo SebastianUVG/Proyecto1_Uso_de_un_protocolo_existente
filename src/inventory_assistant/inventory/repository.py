@@ -5,7 +5,13 @@ from __future__ import annotations
 from datetime import date
 from typing import Protocol
 
-from .models import InventoryMovement, MovementType, Product
+from .models import (
+    InventoryMovement,
+    MovementType,
+    Product,
+    ProductCreation,
+    StockMovementResult,
+)
 
 
 class InventoryRepository(Protocol):
@@ -28,3 +34,26 @@ class InventoryRepository(Protocol):
         movement_type: MovementType | None = None,
     ) -> list[InventoryMovement]: ...
 
+    def create_product(
+        self,
+        *,
+        sku: str,
+        name: str,
+        category: str,
+        initial_stock: int,
+        minimum_stock: int,
+        target_stock: int,
+        unit_price_cents: int,
+        movement_date: date,
+    ) -> ProductCreation: ...
+
+    def record_stock_movement(
+        self,
+        *,
+        product_id: int,
+        movement_type: MovementType,
+        quantity: int,
+        movement_date: date,
+        reason: str | None,
+        reference: str | None,
+    ) -> StockMovementResult: ...

@@ -70,7 +70,7 @@ class LocalMCPClientTests(unittest.TestCase):
         client.connect()
         self.assertTrue(client.is_connected)
         self.assertEqual(client.server_info["name"], "inventory-mcp-server")
-        self.assertEqual(len(client.list_tools()), 6)
+        self.assertEqual(len(client.list_tools()), 9)
 
     def test_ping_and_tools_call_use_real_server(self) -> None:
         client = self.make_client()

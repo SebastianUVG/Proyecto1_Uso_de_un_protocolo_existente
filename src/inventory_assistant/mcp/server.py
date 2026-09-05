@@ -189,8 +189,8 @@ class InventoryMCPServer:
             "capabilities": {"tools": {"listChanged": False}},
             "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
             "instructions": (
-                "Use the inventory tools to query product stock and movement data. "
-                "This server exposes read-only demonstration inventory operations."
+                "Use the inventory tools to query product stock and movement data, "
+                "or to perform controlled product, entry, and exit operations."
             ),
         }
 

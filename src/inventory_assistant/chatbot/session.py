@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from typing import Any, Protocol, Sequence
 
 from inventory_assistant.llm import (
@@ -25,6 +26,18 @@ scope. Choose tools through their schemas, never invent tool results, and coordi
 multiple tools when the request requires it. Explain results in the user's language.
 Preserve conversational context and use it to understand follow-up references. Do
 not claim that an operation succeeded when a tool result reports an error."""
+
+MUTATING_INVENTORY_TOOLS = frozenset(
+    {"add_product", "record_inventory_entry", "record_inventory_exit"}
+)
+_CONFIRMATION_YES = frozenset({"yes", "y", "confirm", "confirmed", "si", "sí"})
+_CONFIRMATION_NO = frozenset({"no", "n", "cancel", "cancelled", "cancelar"})
+
+
+@dataclass(frozen=True, slots=True)
+class PendingOperation:
+    requests: tuple[ToolUseBlock, ...]
+    tool_iterations: int
 
 
 class MCPToolClient(Protocol):
@@ -62,6 +75,7 @@ class ChatbotSession:
             mcp_client.list_tools()
         )
         self._history: list[ConversationMessage] = []
+        self._pending_operation: PendingOperation | None = None
 
     @property
     def history(self) -> tuple[ConversationMessage, ...]:
@@ -71,57 +85,113 @@ class ChatbotSession:
     def tools(self) -> tuple[LLMTool, ...]:
         return tuple(self._tools)
 
+    @property
+    def pending_operation(self) -> PendingOperation | None:
+        return self._pending_operation
+
     def ask(self, user_message: str) -> str:
         if not isinstance(user_message, str) or not user_message.strip():
             raise ChatbotError("The message cannot be empty")
+        if self._pending_operation is not None:
+            return self._handle_confirmation(user_message)
         previous_history_length = len(self._history)
         self._history.append(
             ConversationMessage(role="user", content=user_message.strip())
         )
-        tool_iterations = 0
         try:
-            while True:
-                response = self._provider.generate(
-                    tuple(self._history),
-                    tuple(self._tools),
-                    system_prompt=self._system_prompt,
-                )
-                self._history.append(
-                    ConversationMessage(
-                        role="assistant",
-                        content=tuple(response.blocks),
-                    )
-                )
-                tool_requests = [
-                    block
-                    for block in response.blocks
-                    if isinstance(block, ToolUseBlock)
-                ]
-                if not tool_requests:
-                    answer = "\n".join(
-                        block.text
-                        for block in response.blocks
-                        if isinstance(block, TextBlock) and block.text
-                    ).strip()
-                    if not answer:
-                        raise ChatbotError("The LLM returned no text response")
-                    return answer
-
-                if tool_iterations >= self._max_tool_iterations:
-                    raise ToolLoopLimitError(
-                        "The LLM exceeded the maximum number of tool-use iterations"
-                    )
-                results = tuple(
-                    self._execute_tool(tool_request)
-                    for tool_request in tool_requests
-                )
-                self._history.append(
-                    ConversationMessage(role="user", content=results)
-                )
-                tool_iterations += 1
+            return self._continue_tool_loop(tool_iterations=0)
         except Exception:
             del self._history[previous_history_length:]
             raise
+
+    def _continue_tool_loop(self, *, tool_iterations: int) -> str:
+        while True:
+            response = self._provider.generate(
+                tuple(self._history),
+                tuple(self._tools),
+                system_prompt=self._system_prompt,
+            )
+            self._history.append(
+                ConversationMessage(
+                    role="assistant",
+                    content=tuple(response.blocks),
+                )
+            )
+            tool_requests = tuple(
+                block
+                for block in response.blocks
+                if isinstance(block, ToolUseBlock)
+            )
+            if not tool_requests:
+                answer = "\n".join(
+                    block.text
+                    for block in response.blocks
+                    if isinstance(block, TextBlock) and block.text
+                ).strip()
+                if not answer:
+                    raise ChatbotError("The LLM returned no text response")
+                return answer
+
+            if tool_iterations >= self._max_tool_iterations:
+                raise ToolLoopLimitError(
+                    "The LLM exceeded the maximum number of tool-use iterations"
+                )
+            if any(_requires_confirmation(request.name) for request in tool_requests):
+                preserved_requests = tuple(
+                    ToolUseBlock(
+                        id=request.id,
+                        name=request.name,
+                        arguments=json.loads(json.dumps(request.arguments)),
+                    )
+                    for request in tool_requests
+                )
+                self._pending_operation = PendingOperation(
+                    requests=preserved_requests,
+                    tool_iterations=tool_iterations,
+                )
+                return _confirmation_prompt(preserved_requests)
+
+            results = tuple(self._execute_tool(request) for request in tool_requests)
+            self._history.append(ConversationMessage(role="user", content=results))
+            tool_iterations += 1
+
+    def _handle_confirmation(self, user_message: str) -> str:
+        normalized = user_message.strip().casefold()
+        if normalized not in _CONFIRMATION_YES | _CONFIRMATION_NO:
+            return "Please answer yes or no. The pending inventory operation has not run."
+
+        pending = self._pending_operation
+        assert pending is not None
+        self._pending_operation = None
+        if normalized in _CONFIRMATION_NO:
+            results = tuple(
+                ToolResultBlock(
+                    tool_use_id=request.id,
+                    content=json.dumps(
+                        {
+                            "error": {
+                                "type": "OPERATION_CANCELLED",
+                                "message": "The user cancelled the operation.",
+                            }
+                        },
+                        separators=(",", ":"),
+                    ),
+                    is_error=True,
+                )
+                for request in pending.requests
+            )
+            self._history.append(ConversationMessage(role="user", content=results))
+            answer = "Operation cancelled. No inventory changes were made."
+            self._history.append(
+                ConversationMessage(role="assistant", content=(TextBlock(answer),))
+            )
+            return answer
+
+        results = tuple(self._execute_tool(request) for request in pending.requests)
+        self._history.append(ConversationMessage(role="user", content=results))
+        return self._continue_tool_loop(
+            tool_iterations=pending.tool_iterations + 1
+        )
 
     def _execute_tool(self, request: ToolUseBlock) -> ToolResultBlock:
         try:
@@ -158,3 +228,41 @@ class ChatbotSession:
             ),
             is_error=is_error,
         )
+
+
+def _requires_confirmation(tool_name: str) -> bool:
+    if tool_name in MUTATING_INVENTORY_TOOLS:
+        return True
+    prefix, separator, original_name = tool_name.partition("__")
+    return (
+        bool(separator)
+        and prefix == "inventory"
+        and original_name in MUTATING_INVENTORY_TOOLS
+    )
+
+
+def _confirmation_prompt(requests: tuple[ToolUseBlock, ...]) -> str:
+    descriptions = [_describe_mutation(request) for request in requests]
+    return "\n".join([*descriptions, "Confirm? (yes/no)"])
+
+
+def _describe_mutation(request: ToolUseBlock) -> str:
+    name = request.name.partition("__")[2] or request.name
+    arguments = request.arguments
+    if name == "add_product":
+        return (
+            f"This will create {arguments.get('name', 'a product')} "
+            f"({arguments.get('sku', 'unknown SKU')}) with initial stock "
+            f"{arguments.get('initial_stock', 'unknown')}."
+        )
+    selector = (
+        arguments.get("name")
+        or arguments.get("sku")
+        or f"product {arguments.get('product_id', 'unknown')}"
+    )
+    quantity = arguments.get("quantity", "unknown")
+    if name == "record_inventory_entry":
+        return f"This will add {quantity} units to {selector}."
+    if name == "record_inventory_exit":
+        return f"This will remove {quantity} units from {selector}."
+    return f"This will execute the pending inventory operation {request.name}."

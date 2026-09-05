@@ -4,19 +4,27 @@ from __future__ import annotations
 
 from collections import defaultdict
 from datetime import date, timedelta
+from decimal import Decimal, InvalidOperation
 
-from .exceptions import InvalidInventoryQueryError, ProductNotFoundError
+from .exceptions import (
+    DuplicateSKUError,
+    InsufficientStockError,
+    InvalidInventoryQueryError,
+    ProductNotFoundError,
+)
 from .models import (
     InventoryMovement,
     MovementRanking,
     MovementType,
     Product,
     ProductActivity,
+    ProductCreation,
     ProductStock,
     RankingDirection,
     RankingMetric,
     RestockRecommendation,
     StockStatus,
+    StockMovementResult,
 )
 from .repository import InventoryRepository
 
@@ -36,6 +44,86 @@ class InventoryService:
     ) -> ProductStock:
         product = self._resolve_product(product_id=product_id, sku=sku, name=name)
         return ProductStock(product=product, status=self._stock_status(product))
+
+    def add_product(
+        self,
+        *,
+        sku: str,
+        name: str,
+        category: str,
+        initial_stock: int,
+        minimum_stock: int,
+        target_stock: int,
+        unit_price: Decimal | int | float | str,
+        movement_date: date | None = None,
+    ) -> ProductCreation:
+        normalized_sku = self._required_text(sku, "sku")
+        normalized_name = self._required_text(name, "name")
+        normalized_category = self._required_text(category, "category")
+        self._non_negative_integer(initial_stock, "initial_stock")
+        self._non_negative_integer(minimum_stock, "minimum_stock")
+        self._non_negative_integer(target_stock, "target_stock")
+        if target_stock < minimum_stock:
+            raise InvalidInventoryQueryError(
+                "target_stock must be greater than or equal to minimum_stock"
+            )
+        unit_price_cents = self._price_to_cents(unit_price)
+        if self._repository.get_product_by_sku(normalized_sku) is not None:
+            raise DuplicateSKUError("a product with this SKU already exists")
+        return self._repository.create_product(
+            sku=normalized_sku,
+            name=normalized_name,
+            category=normalized_category,
+            initial_stock=initial_stock,
+            minimum_stock=minimum_stock,
+            target_stock=target_stock,
+            unit_price_cents=unit_price_cents,
+            movement_date=movement_date or date.today(),
+        )
+
+    def record_inventory_entry(
+        self,
+        *,
+        quantity: int,
+        product_id: int | None = None,
+        sku: str | None = None,
+        name: str | None = None,
+        reason: str | None = None,
+        reference: str | None = None,
+        movement_date: date | None = None,
+    ) -> StockMovementResult:
+        return self._record_inventory_change(
+            movement_type=MovementType.IN,
+            quantity=quantity,
+            product_id=product_id,
+            sku=sku,
+            name=name,
+            reason=reason,
+            reference=reference,
+            movement_date=movement_date,
+        )
+
+    def record_inventory_exit(
+        self,
+        *,
+        quantity: int,
+        product_id: int | None = None,
+        sku: str | None = None,
+        name: str | None = None,
+        reason: str | None = None,
+        reference: str | None = None,
+        movement_date: date | None = None,
+    ) -> StockMovementResult:
+        return self._record_inventory_change(
+            movement_type=MovementType.OUT,
+            quantity=quantity,
+            product_id=product_id,
+            sku=sku,
+            name=name,
+            reason=reason,
+            reference=reference,
+            movement_date=movement_date,
+        )
 
     def get_low_stock_products(
         self,
@@ -238,6 +326,34 @@ class InventoryService:
             raise ProductNotFoundError("product not found")
         return product
 
+    def _record_inventory_change(
+        self,
+        *,
+        movement_type: MovementType,
+        quantity: int,
+        product_id: int | None,
+        sku: str | None,
+        name: str | None,
+        reason: str | None,
+        reference: str | None,
+        movement_date: date | None,
+    ) -> StockMovementResult:
+        self._positive_integer(quantity, "quantity")
+        product = self._resolve_product(product_id=product_id, sku=sku, name=name)
+        if movement_type is MovementType.OUT and quantity > product.current_stock:
+            raise InsufficientStockError(
+                f"insufficient stock: available {product.current_stock}, "
+                f"requested {quantity}"
+            )
+        return self._repository.record_stock_movement(
+            product_id=product.id,
+            movement_type=movement_type,
+            quantity=quantity,
+            movement_date=movement_date or date.today(),
+            reason=self._optional_text(reason, "reason"),
+            reference=self._optional_text(reference, "reference"),
+        )
+
     @staticmethod
     def _stock_status(product: Product) -> StockStatus:
         if product.current_stock == 0:
@@ -264,3 +380,43 @@ class InventoryService:
         if date_from is not None and date_to is not None and date_from > date_to:
             raise InvalidInventoryQueryError("date_from cannot be after date_to")
 
+    @staticmethod
+    def _required_text(value: str, name: str) -> str:
+        if not isinstance(value, str) or not value.strip():
+            raise InvalidInventoryQueryError(f"{name} cannot be empty")
+        return value.strip()
+
+    @classmethod
+    def _optional_text(cls, value: str | None, name: str) -> str | None:
+        return None if value is None else cls._required_text(value, name)
+
+    @staticmethod
+    def _non_negative_integer(value: int, name: str) -> None:
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise InvalidInventoryQueryError(
+                f"{name} must be a non-negative integer"
+            )
+
+    @staticmethod
+    def _positive_integer(value: int, name: str) -> None:
+        if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+            raise InvalidInventoryQueryError(f"{name} must be a positive integer")
+
+    @staticmethod
+    def _price_to_cents(value: Decimal | int | float | str) -> int:
+        try:
+            price = Decimal(str(value))
+        except (InvalidOperation, ValueError) as error:
+            raise InvalidInventoryQueryError(
+                "unit_price must be a non-negative number"
+            ) from error
+        if not price.is_finite() or price < 0:
+            raise InvalidInventoryQueryError(
+                "unit_price must be a non-negative number"
+            )
+        cents = price * 100
+        if cents != cents.to_integral_value():
+            raise InvalidInventoryQueryError(
+                "unit_price must have at most two decimal places"
+            )
+        return int(cents)

@@ -91,3 +91,17 @@ class MovementRanking:
     total_units: int
     transaction_count: int
 
+
+@dataclass(frozen=True, slots=True)
+class ProductCreation:
+    product: Product
+    initial_movement: InventoryMovement | None
+
+
+@dataclass(frozen=True, slots=True)
+class StockMovementResult:
+    product: Product
+    quantity: int
+    previous_stock: int
+    new_stock: int
+    movement: InventoryMovement

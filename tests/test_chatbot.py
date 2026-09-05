@@ -35,6 +35,18 @@ DISCOVERED_TOOLS = [
             "required": ["sku"],
         },
     },
+    {
+        "name": "inventory__record_inventory_entry",
+        "description": "Record an inventory entry.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "sku": {"type": "string"},
+                "quantity": {"type": "integer"},
+            },
+            "required": ["sku", "quantity"],
+        },
+    },
 ]
 
 
@@ -71,6 +83,15 @@ class FakeMCPClient:
                 "isError": False,
                 "structuredContent": {
                     "product": {"sku": "ELEC-001", "current_stock": 0}
+                },
+            },
+            "inventory__record_inventory_entry": {
+                "isError": False,
+                "structuredContent": {
+                    "product": {"sku": "WARE-003", "current_stock": 20},
+                    "quantity": 20,
+                    "previous_stock": 0,
+                    "new_stock": 20,
                 },
             },
         }
@@ -217,14 +238,100 @@ class ChatbotSessionTests(unittest.TestCase):
         session = ChatbotSession(provider, FakeMCPClient())
         self.assertEqual(
             [tool.name for tool in session.tools],
-            ["get_low_stock_products", "get_product_stock"],
+            [
+                "get_low_stock_products",
+                "get_product_stock",
+                "inventory__record_inventory_entry",
+            ],
         )
         self.assertEqual(
             session.tools[0].input_schema,
             DISCOVERED_TOOLS[0]["inputSchema"],
         )
 
+    def test_write_tool_waits_for_confirmation_and_preserves_arguments(self) -> None:
+        arguments = {"sku": "WARE-003", "quantity": 20}
+        provider = ScriptedLLMProvider(
+            [
+                response(
+                    ToolUseBlock(
+                        "write-1",
+                        "inventory__record_inventory_entry",
+                        arguments,
+                    )
+                ),
+                response(TextBlock("20 units were added. Current stock: 20.")),
+            ]
+        )
+        mcp = FakeMCPClient()
+        session = ChatbotSession(provider, mcp)
+
+        prompt = session.ask("Add 20 units of Safety Gloves")
+        self.assertIn("Confirm? (yes/no)", prompt)
+        self.assertIn("20", prompt)
+        self.assertEqual(mcp.calls, [])
+        self.assertEqual(
+            session.pending_operation.requests[0].arguments,
+            arguments,
+        )
+
+        answer = session.ask("yes")
+        self.assertEqual(answer, "20 units were added. Current stock: 20.")
+        self.assertEqual(
+            mcp.calls,
+            [("inventory__record_inventory_entry", arguments)],
+        )
+        self.assertIsNone(session.pending_operation)
+        tool_result = provider.calls[1][0][-1].content[0]
+        self.assertIn('"new_stock":20', tool_result.content)
+
+    def test_no_cancels_write_without_calling_mcp(self) -> None:
+        provider = ScriptedLLMProvider(
+            [
+                response(
+                    ToolUseBlock(
+                        "write-1",
+                        "inventory__record_inventory_entry",
+                        {"sku": "WARE-003", "quantity": 20},
+                    )
+                )
+            ]
+        )
+        mcp = FakeMCPClient()
+        session = ChatbotSession(provider, mcp)
+        session.ask("Add stock")
+
+        answer = session.ask("no")
+        self.assertIn("cancelled", answer.casefold())
+        self.assertEqual(mcp.calls, [])
+        self.assertIsNone(session.pending_operation)
+        cancellation_result = session.history[-2].content[0]
+        self.assertTrue(cancellation_result.is_error)
+        self.assertIn("OPERATION_CANCELLED", cancellation_result.content)
+
+    def test_unclear_confirmation_keeps_exact_operation_pending(self) -> None:
+        provider = ScriptedLLMProvider(
+            [
+                response(
+                    ToolUseBlock(
+                        "write-1",
+                        "inventory__record_inventory_entry",
+                        {"sku": "WARE-003", "quantity": 20},
+                    )
+                )
+            ]
+        )
+        mcp = FakeMCPClient()
+        session = ChatbotSession(provider, mcp)
+        session.ask("Add stock")
+        answer = session.ask("maybe later")
+        self.assertIn("yes or no", answer)
+        self.assertEqual(mcp.calls, [])
+        self.assertEqual(
+            session.pending_operation.requests[0].arguments,
+            {"sku": "WARE-003", "quantity": 20},
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
-

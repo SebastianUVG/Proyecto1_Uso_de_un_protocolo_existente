@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import unittest
+from dataclasses import replace
 from datetime import date
+from decimal import Decimal
 
 from inventory_assistant.inventory.exceptions import (
+    DuplicateSKUError,
+    InsufficientStockError,
     InvalidInventoryQueryError,
     ProductNotFoundError,
 )
@@ -13,9 +17,11 @@ from inventory_assistant.inventory.models import (
     InventoryMovement,
     MovementType,
     Product,
+    ProductCreation,
     RankingDirection,
     RankingMetric,
     StockStatus,
+    StockMovementResult,
 )
 from inventory_assistant.inventory.service import InventoryService
 
@@ -112,6 +118,83 @@ class FakeInventoryRepository:
             and (movement_type is None or item.movement_type is movement_type)
         ]
         return sorted(results, key=lambda item: (item.movement_date, item.id), reverse=True)
+
+    def create_product(
+        self,
+        *,
+        sku: str,
+        name: str,
+        category: str,
+        initial_stock: int,
+        minimum_stock: int,
+        target_stock: int,
+        unit_price_cents: int,
+        movement_date: date,
+    ) -> ProductCreation:
+        if self.get_product_by_sku(sku) is not None:
+            raise DuplicateSKUError("a product with this SKU already exists")
+        product = Product(
+            id=max((item.id for item in self.products), default=0) + 1,
+            sku=sku,
+            name=name,
+            category=category,
+            current_stock=initial_stock,
+            minimum_stock=minimum_stock,
+            target_stock=target_stock,
+            unit_price_cents=unit_price_cents,
+            created_at="2026-09-05T12:00:00+00:00",
+            updated_at="2026-09-05T12:00:00+00:00",
+        )
+        self.products.append(product)
+        movement = None
+        if initial_stock > 0:
+            movement = make_movement(
+                len(self.movements) + 1,
+                product.id,
+                MovementType.IN,
+                initial_stock,
+                movement_date,
+            )
+            self.movements.append(movement)
+        return ProductCreation(product=product, initial_movement=movement)
+
+    def record_stock_movement(
+        self,
+        *,
+        product_id: int,
+        movement_type: MovementType,
+        quantity: int,
+        movement_date: date,
+        reason: str | None,
+        reference: str | None,
+    ) -> StockMovementResult:
+        product = self.get_product_by_id(product_id)
+        if product is None:
+            raise ProductNotFoundError("product not found")
+        previous_stock = product.current_stock
+        delta = quantity if movement_type is MovementType.IN else -quantity
+        if previous_stock + delta < 0:
+            raise InsufficientStockError("insufficient stock")
+        updated = replace(product, current_stock=previous_stock + delta)
+        self.products[self.products.index(product)] = updated
+        movement = InventoryMovement(
+            id=len(self.movements) + 1,
+            product_id=product.id,
+            movement_type=movement_type,
+            quantity=quantity,
+            movement_date=movement_date,
+            reason=reason,
+            reference=reference,
+            created_at="2026-09-05T12:00:00+00:00",
+        )
+        self.movements.append(movement)
+        return StockMovementResult(
+            product=updated,
+            quantity=quantity,
+            previous_stock=previous_stock,
+            new_stock=updated.current_stock,
+            movement=movement,
+        )
 
 
 class InventoryServiceTests(unittest.TestCase):
@@ -220,7 +303,78 @@ class InventoryServiceTests(unittest.TestCase):
         with self.assertRaises(InvalidInventoryQueryError):
             self.service.get_inactive_products(inactive_days=0)
 
+    def test_adds_product_with_auditable_initial_stock(self) -> None:
+        result = self.service.add_product(
+            sku="LAP-005",
+            name="Dell Latitude 5550",
+            category="Electronics",
+            initial_stock=10,
+            minimum_stock=5,
+            target_stock=15,
+            unit_price=Decimal("850.00"),
+            movement_date=date(2026, 9, 5),
+        )
+        self.assertEqual(result.product.current_stock, 10)
+        self.assertEqual(result.product.unit_price_cents, 85000)
+        self.assertIsNotNone(result.initial_movement)
+        self.assertEqual(result.initial_movement.movement_type, MovementType.IN)
+        self.assertEqual(result.initial_movement.quantity, 10)
+
+    def test_rejects_duplicate_sku_and_invalid_product_data(self) -> None:
+        with self.assertRaises(DuplicateSKUError):
+            self.service.add_product(
+                sku="OUT",
+                name="Another",
+                category="Test",
+                initial_stock=0,
+                minimum_stock=0,
+                target_stock=1,
+                unit_price=1,
+            )
+        invalid_cases = [
+            {"sku": "", "initial_stock": 0, "minimum_stock": 0, "target_stock": 1},
+            {"sku": "NEW", "initial_stock": -1, "minimum_stock": 0, "target_stock": 1},
+            {"sku": "NEW", "initial_stock": 0, "minimum_stock": 2, "target_stock": 1},
+        ]
+        for case in invalid_cases:
+            with self.subTest(case=case), self.assertRaises(InvalidInventoryQueryError):
+                self.service.add_product(
+                    name="New product",
+                    category="Test",
+                    unit_price=1,
+                    **case,
+                )
+
+    def test_records_entry_and_exit_with_structured_stock_changes(self) -> None:
+        entry = self.service.record_inventory_entry(
+            sku="LOW",
+            quantity=4,
+            reason="Delivery",
+            movement_date=date(2026, 9, 5),
+        )
+        self.assertEqual((entry.previous_stock, entry.new_stock), (2, 6))
+        self.assertEqual(entry.movement.movement_type, MovementType.IN)
+        exit_result = self.service.record_inventory_exit(
+            sku="LOW",
+            quantity=3,
+            reason="Sale",
+            movement_date=date(2026, 9, 5),
+        )
+        self.assertEqual((exit_result.previous_stock, exit_result.new_stock), (6, 3))
+        self.assertEqual(exit_result.movement.movement_type, MovementType.OUT)
+
+    def test_rejects_invalid_movements_and_never_allows_negative_stock(self) -> None:
+        for quantity in (0, -1):
+            with self.subTest(quantity=quantity), self.assertRaises(
+                InvalidInventoryQueryError
+            ):
+                self.service.record_inventory_entry(sku="LOW", quantity=quantity)
+        with self.assertRaises(ProductNotFoundError):
+            self.service.record_inventory_entry(sku="UNKNOWN", quantity=1)
+        with self.assertRaises(InsufficientStockError):
+            self.service.record_inventory_exit(sku="LOW", quantity=3)
+        self.assertEqual(self.service.get_product_stock(sku="LOW").product.current_stock, 2)
+
 
 if __name__ == "__main__":
     unittest.main()
-

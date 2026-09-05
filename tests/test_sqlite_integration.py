@@ -13,6 +13,10 @@ from unittest.mock import patch
 
 from inventory_assistant.config import DatabaseConfig
 from inventory_assistant.inventory.bootstrap import initialize_database
+from inventory_assistant.inventory.exceptions import (
+    DuplicateSKUError,
+    InsufficientStockError,
+)
 from inventory_assistant.inventory.models import (
     MovementType,
     RankingDirection,
@@ -144,6 +148,136 @@ class SQLiteIntegrationTests(unittest.TestCase):
         self.assertEqual(ranking[0].product.sku, "ELEC-002")
         self.assertEqual(ranking[0].total_units, 95)
         self.assertEqual(ranking[0].transaction_count, 3)
+
+    def test_add_product_and_initial_movement_are_atomic(self) -> None:
+        result = self.service.add_product(
+            sku="LAP-005",
+            name="Dell Latitude 5550",
+            category="Electronics",
+            initial_stock=10,
+            minimum_stock=5,
+            target_stock=15,
+            unit_price="850.00",
+            movement_date=date(2026, 9, 5),
+        )
+        self.assertEqual(result.product.current_stock, 10)
+        self.assertIsNotNone(result.initial_movement)
+        movements = self.repository.list_movements(product_id=result.product.id)
+        self.assertEqual(len(movements), 1)
+        self.assertEqual(movements[0].movement_type, MovementType.IN)
+        self.assertEqual(movements[0].quantity, 10)
+        with self.assertRaises(DuplicateSKUError):
+            self.service.add_product(
+                sku="lap-005",
+                name="Duplicate laptop",
+                category="Electronics",
+                initial_stock=0,
+                minimum_stock=0,
+                target_stock=1,
+                unit_price=1,
+            )
+
+    def test_entry_and_exit_update_stock_and_create_movements(self) -> None:
+        before = self.service.get_product_stock(sku="OFF-001").product.current_stock
+        entry = self.service.record_inventory_entry(
+            sku="OFF-001",
+            quantity=7,
+            reason="Supplier delivery",
+            reference="TEST-ENTRY-001",
+            movement_date=date(2026, 9, 5),
+        )
+        self.assertEqual((entry.previous_stock, entry.new_stock), (before, before + 7))
+        exit_result = self.service.record_inventory_exit(
+            sku="OFF-001",
+            quantity=4,
+            reason="Customer sale",
+            reference="TEST-EXIT-001",
+            movement_date=date(2026, 9, 5),
+        )
+        self.assertEqual(
+            (exit_result.previous_stock, exit_result.new_stock),
+            (before + 7, before + 3),
+        )
+        movements = self.repository.list_movements(
+            product_id=exit_result.product.id,
+            date_from=date(2026, 9, 5),
+        )
+        self.assertEqual(
+            {movement.movement_type for movement in movements},
+            {MovementType.IN, MovementType.OUT},
+        )
+
+    def test_insufficient_exit_changes_neither_stock_nor_movements(self) -> None:
+        product = self.service.get_product_stock(sku="ELEC-002").product
+        movement_count = len(self.repository.list_movements(product_id=product.id))
+        with self.assertRaises(InsufficientStockError):
+            self.service.record_inventory_exit(
+                sku="ELEC-002",
+                quantity=product.current_stock + 1,
+                reason="Impossible sale",
+            )
+        unchanged = self.service.get_product_stock(sku="ELEC-002").product
+        self.assertEqual(unchanged.current_stock, product.current_stock)
+        self.assertEqual(
+            len(self.repository.list_movements(product_id=product.id)),
+            movement_count,
+        )
+
+    def test_product_creation_rolls_back_when_initial_movement_fails(self) -> None:
+        with closing(sqlite3.connect(self.database_path)) as connection:
+            with connection:
+                connection.execute(
+                    """
+                    CREATE TRIGGER fail_initial_movement
+                    BEFORE INSERT ON inventory_movements
+                    WHEN NEW.reason = 'Initial stock'
+                    BEGIN
+                        SELECT RAISE(ABORT, 'forced initial movement failure');
+                    END
+                    """
+                )
+        before_products = len(self.repository.list_products())
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.service.add_product(
+                sku="ROLLBACK-001",
+                name="Rollback product",
+                category="Test",
+                initial_stock=5,
+                minimum_stock=1,
+                target_stock=10,
+                unit_price=10,
+            )
+        self.assertIsNone(self.repository.get_product_by_sku("ROLLBACK-001"))
+        self.assertEqual(len(self.repository.list_products()), before_products)
+
+    def test_movement_rolls_back_when_stock_update_fails(self) -> None:
+        product = self.service.get_product_stock(sku="OFF-001").product
+        movements_before = len(self.repository.list_movements(product_id=product.id))
+        with closing(sqlite3.connect(self.database_path)) as connection:
+            with connection:
+                connection.execute(
+                    f"""
+                    CREATE TRIGGER fail_stock_update
+                    BEFORE UPDATE OF current_stock ON products
+                    WHEN NEW.id = {product.id}
+                    BEGIN
+                        SELECT RAISE(ABORT, 'forced stock update failure');
+                    END
+                    """
+                )
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.service.record_inventory_entry(
+                sku="OFF-001",
+                quantity=5,
+                reason="Rollback test",
+                reference="ROLLBACK-MOVEMENT-001",
+            )
+        unchanged = self.service.get_product_stock(sku="OFF-001").product
+        self.assertEqual(unchanged.current_stock, product.current_stock)
+        self.assertEqual(
+            len(self.repository.list_movements(product_id=product.id)),
+            movements_before,
+        )
 
 
 if __name__ == "__main__":
