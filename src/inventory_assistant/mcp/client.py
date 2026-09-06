@@ -87,7 +87,7 @@ class LocalMCPClient:
         if environment is not None:
             self._environment.update(environment)
         self._working_directory = working_directory or Path.cwd()
-        self._logger = MCPClientFileLogger(config.log_path)
+        self._logger = MCPClientFileLogger(config.log_path, transport="stdio")
         self._process: subprocess.Popen[str] | None = None
         self._pending: dict[int, _PendingRequest] = {}
         self._pending_lock = threading.Lock()

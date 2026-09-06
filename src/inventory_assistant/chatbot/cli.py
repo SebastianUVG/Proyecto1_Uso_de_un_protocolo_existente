@@ -10,6 +10,7 @@ from inventory_assistant.config import (
     ChatbotConfig,
     ConfigurationError,
     ExternalMCPConfig,
+    InventoryMCPConfig,
     MCPClientConfig,
     OpenAIConfig,
 )
@@ -29,6 +30,7 @@ def main() -> None:
         openai_config = OpenAIConfig.from_env()
         mcp_config = MCPClientConfig.from_env()
         external_mcp_config = ExternalMCPConfig.from_env()
+        inventory_mcp_config = InventoryMCPConfig.from_env()
         chatbot_config = ChatbotConfig.from_env()
         provider = OpenAILLMProvider(openai_config)
     except (ConfigurationError, LLMProviderError) as error:
@@ -37,7 +39,10 @@ def main() -> None:
 
     client = MCPServerManager(
         mcp_config,
-        configured_server_definitions(external_mcp_config),
+        configured_server_definitions(
+            external_mcp_config,
+            inventory_config=inventory_mcp_config,
+        ),
     )
     try:
         client.connect()

@@ -23,8 +23,16 @@ SENSITIVE_KEYS = {
 class MCPInteractionLogger:
     """Write one redacted JSON log record per line to stderr by default."""
 
-    def __init__(self, stream: TextIO | None = None) -> None:
+    def __init__(
+        self,
+        stream: TextIO | None = None,
+        *,
+        server: str = "inventory",
+        transport: str = "stdio",
+    ) -> None:
         self._stream = stream or sys.stderr
+        self._server = server
+        self._transport = transport
 
     def log_message(
         self,
@@ -36,6 +44,8 @@ class MCPInteractionLogger:
         record = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "direction": direction,
+            "server": self._server,
+            "transport": self._transport,
             "method": method or message.get("method"),
             "request_id": message.get("id"),
             "message": redact_secrets(message),
@@ -47,6 +57,8 @@ class MCPInteractionLogger:
             {
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "direction": direction,
+                "server": self._server,
+                "transport": self._transport,
                 "method": None,
                 "request_id": None,
                 "message": {
@@ -61,6 +73,8 @@ class MCPInteractionLogger:
             {
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "direction": "server",
+                "server": self._server,
+                "transport": self._transport,
                 "method": method,
                 "request_id": request_id,
                 "event": "internal_error",
@@ -78,8 +92,9 @@ class MCPInteractionLogger:
 class MCPClientFileLogger:
     """Append redacted client-side MCP interactions to a JSONL file."""
 
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, *, transport: str = "stdio") -> None:
         self.path = path
+        self._transport = transport
         self._lock = threading.Lock()
 
     def log_message(
@@ -94,6 +109,7 @@ class MCPClientFileLogger:
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "direction": direction,
             "server": server,
+            "transport": self._transport,
             "method": method,
             "request_id": request_id,
             "message": redact_secrets(message),

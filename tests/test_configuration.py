@@ -12,6 +12,7 @@ from inventory_assistant.config import (
     AnthropicConfig,
     ConfigurationError,
     ExternalMCPConfig,
+    InventoryMCPConfig,
     OpenAIConfig,
     _load_environment_file,
 )
@@ -116,6 +117,43 @@ class ExternalMCPConfigurationTests(unittest.TestCase):
                     ExternalMCPConfig.from_env(
                         project_root=Path(temporary_directory)
                     )
+
+
+class InventoryMCPConfigurationTests(unittest.TestCase):
+    def test_stdio_and_localhost_http_are_defaults(self) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            config = InventoryMCPConfig.from_env()
+        self.assertEqual(config.transport, "stdio")
+        self.assertEqual(config.http_host, "127.0.0.1")
+        self.assertEqual(config.http_port, 8000)
+        self.assertEqual(config.url, "http://127.0.0.1:8000/mcp")
+
+    def test_http_transport_host_port_and_url_are_configurable(self) -> None:
+        environment = {
+            "INVENTORY_MCP_TRANSPORT": "HTTP",
+            "INVENTORY_MCP_HTTP_HOST": "localhost",
+            "INVENTORY_MCP_HTTP_PORT": "8123",
+            "INVENTORY_MCP_URL": "https://inventory.example/mcp",
+        }
+        with patch.dict(os.environ, environment, clear=True):
+            config = InventoryMCPConfig.from_env()
+        self.assertEqual(config.transport, "http")
+        self.assertEqual(config.http_host, "localhost")
+        self.assertEqual(config.http_port, 8123)
+        self.assertEqual(config.url, "https://inventory.example/mcp")
+
+    def test_rejects_unknown_transport_invalid_port_and_non_mcp_url(self) -> None:
+        invalid_environments = (
+            {"INVENTORY_MCP_TRANSPORT": "websocket"},
+            {"INVENTORY_MCP_HTTP_PORT": "70000"},
+            {"INVENTORY_MCP_URL": "http://localhost:8000/not-mcp"},
+            {"INVENTORY_MCP_URL": "file:///tmp/mcp"},
+        )
+        for environment in invalid_environments:
+            with self.subTest(environment=environment):
+                with patch.dict(os.environ, environment, clear=True):
+                    with self.assertRaises(ConfigurationError):
+                        InventoryMCPConfig.from_env()
 
 
 if __name__ == "__main__":

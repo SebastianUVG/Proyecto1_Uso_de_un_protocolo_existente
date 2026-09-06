@@ -1,6 +1,6 @@
 # Inventory Assistant
 
-This repository contains the incremental implementation of a multi-server assistant for a university networking project. It includes a terminal chatbot, an OpenAI LLM adapter, a manual local MCP client, an Inventory MCP Server, integrations with the existing Filesystem and Git MCP servers, and a reproducible SQLite inventory database. The host-side MCP client and JSON-RPC lifecycle are implemented without an MCP SDK or a JSON-RPC framework.
+This repository contains the incremental implementation of a multi-server assistant for a university networking project. It includes a terminal chatbot, an OpenAI LLM adapter, a manual MCP client with stdio and Streamable HTTP transports, an Inventory MCP Server, integrations with the existing Filesystem and Git MCP servers, and a reproducible SQLite inventory database. The host-side MCP client, JSON-RPC lifecycle, and Inventory MCP Server are implemented without an MCP SDK or a JSON-RPC framework.
 
 ## Requirements
 
@@ -82,7 +82,7 @@ python scripts/demo_inventory.py
 
 It shows product counts, low-stock products, restock recommendations, inactive products, and the products with the most outgoing units. Time-based examples use the same reference date as the deterministic seed.
 
-## Run the local MCP server
+## Inventory MCP locally through stdio
 
 Prepare the database first, then start the newline-delimited stdio server:
 
@@ -111,7 +111,12 @@ notifications/initialized notification
 tools/list or tools/call
 ```
 
-Close the server's standard input to stop it cleanly.
+Close the server's standard input to stop it cleanly. The chatbot uses this
+transport by default. In `.env`, keep:
+
+```env
+INVENTORY_MCP_TRANSPORT=stdio
+```
 
 ## Run the MCP stdio demonstration
 
@@ -145,6 +150,79 @@ The five write tools are executed only after host-side user confirmation. `list_
 `adjust_inventory` receives a physical `counted_stock`, calculates its difference from the stored stock, and creates either `ADJUSTMENT_IN` or `ADJUSTMENT_OUT`. An equal count returns a no-change result without creating a movement. Movement creation and stock update share one SQLite transaction, so a failure rolls back both.
 
 Positive initial stock is stored as an `IN` movement named `Initial stock` in the same SQLite transaction that creates the product. Regular entries and exits also create their movement and update `current_stock` in one transaction.
+
+## Inventory MCP locally through HTTP
+
+HTTP localhost is the preparation stage for a later remote deployment. It still
+uses the same SQLite repository, inventory service, MCP lifecycle, tool dispatcher,
+and twelve tool definitions as stdio.
+
+The implementation follows MCP `2025-06-18` Streamable HTTP and uses Python's
+standard HTTP library, so no HTTP dependency was added. The selected subset is:
+
+- one `/mcp` endpoint;
+- one JSON-RPC message per HTTP `POST`;
+- `application/json` responses for requests;
+- HTTP `202 Accepted` with an empty body for accepted notifications;
+- an `Mcp-Session-Id` created by a successful `initialize` response and required afterward;
+- `MCP-Protocol-Version: 2025-06-18` after negotiation;
+- HTTP `DELETE` to close a session;
+- HTTP `405 Method Not Allowed` for `GET`, because this server does not need an optional standalone SSE channel;
+- validation of any supplied `Origin` header, accepting only loopback origins during this localhost stage.
+
+The client accepts both JSON responses and finite SSE responses to `POST`, as
+required by Streamable HTTP. The server chooses direct JSON because its current
+tools do not send server-initiated requests, progress streams, or notifications.
+
+The responsibilities remain separate:
+
+```text
+HTTP: endpoint, headers, status codes, sessions, and UTF-8 bodies
+JSON-RPC: message validation, IDs, results, and protocol error objects
+MCP: initialize lifecycle, capabilities, ping, tools/list, and tools/call
+Inventory: tool dispatcher -> InventoryService -> repository -> SQLite
+```
+
+Prepare SQLite and start the HTTP server in the first terminal:
+
+```powershell
+python -m inventory_assistant.inventory.bootstrap --seed
+python -m inventory_assistant.mcp.http_server
+```
+
+The safe defaults are `127.0.0.1`, port `8000`, and endpoint `/mcp`. To change
+the local bind address or port, configure the server before starting it:
+
+```env
+INVENTORY_MCP_HTTP_HOST=127.0.0.1
+INVENTORY_MCP_HTTP_PORT=8000
+```
+
+In a second terminal, select HTTP for Inventory and start the normal chatbot.
+Filesystem and Git keep their independent stdio connections if enabled:
+
+```powershell
+$env:INVENTORY_MCP_TRANSPORT = "http"
+$env:INVENTORY_MCP_URL = "http://127.0.0.1:8000/mcp"
+python -m inventory_assistant.chatbot.cli
+```
+
+Alternatively, store those two settings in the local `.env` file. Shell values
+take precedence over `.env`. To return to the original mode:
+
+```powershell
+$env:INVENTORY_MCP_TRANSPORT = "stdio"
+python -m inventory_assistant.chatbot.cli
+```
+
+If the transport variable is stored in `.env`, change its value there instead.
+Stop the HTTP server with `Ctrl+C` when it is no longer needed. Authentication and
+HTTPS are intentionally deferred until the cloud-deployment stage.
+
+Protocol references used for this implementation:
+
+- [MCP 2025-06-18 Streamable HTTP transport](https://modelcontextprotocol.io/specification/2025-06-18/basic/transports)
+- [MCP 2025-06-18 lifecycle](https://modelcontextprotocol.io/specification/2025-06-18/basic/lifecycle)
 
 ## Configure multiple local MCP servers
 
@@ -280,6 +358,10 @@ $env:OPENAI_TIMEOUT_SECONDS = "60"
 $env:MCP_REQUEST_TIMEOUT_SECONDS = "10"
 $env:MCP_LOG_PATH = "logs/mcp.jsonl"
 $env:MAX_TOOL_ITERATIONS = "5"
+$env:INVENTORY_MCP_TRANSPORT = "stdio"
+$env:INVENTORY_MCP_URL = "http://127.0.0.1:8000/mcp"
+$env:INVENTORY_MCP_HTTP_HOST = "127.0.0.1"
+$env:INVENTORY_MCP_HTTP_PORT = "8000"
 $env:FILESYSTEM_MCP_ENABLED = "true"
 $env:GIT_MCP_ENABLED = "true"
 ```
@@ -332,7 +414,7 @@ MCP logs are stored separately from normal conversational output. Each entry con
 python -m unittest discover -s tests -v
 ```
 
-The suite covers the domain service, SQLite integration, JSON-RPC, MCP lifecycle, all twelve inventory tools, filtered listings, administrative updates, physical inventory adjustments, transaction rollback, the real local MCP client and subprocess, request correlation, timeouts, multi-server registration, discovery, duplicate tool names, routing, disconnection, clean shutdown, write confirmations and cancellations, tool-use loops, multiple tool calls, context, OpenAI response conversion, and tool errors. It uses fake API clients and never consumes OpenAI API credits. Filesystem and Git tests use temporary or fake clients and never modify the main repository.
+The suite covers the domain service, SQLite integration, JSON-RPC, MCP lifecycle, all twelve inventory tools, filtered listings, administrative updates, physical inventory adjustments, transaction rollback, stdio and HTTP clients and servers, request correlation, HTTP sessions, unavailable servers, timeouts, transport parity, multi-server registration, discovery, duplicate tool names, routing, disconnection, clean shutdown, write confirmations and cancellations, tool-use loops, multiple tool calls, context, OpenAI response conversion, and tool errors. It uses fake API clients and never consumes OpenAI API credits. Filesystem and Git tests use temporary or fake clients and never modify the main repository.
 
 ## Current architecture
 
@@ -342,10 +424,11 @@ Terminal chatbot
     -> OpenAILLMProvider
     -> OpenAI Chat Completions API
     -> MCPServerManager
-       -> LocalMCPClient -> Inventory MCP Server
-       -> LocalMCPClient -> Filesystem MCP Server
-       -> LocalMCPClient -> Git MCP Server
-    -> newline-delimited stdio transport
+       |-> LocalMCPClient --stdio----------> Inventory MCP core
+       |-> HTTPMCPClient --HTTP--> HTTP Server -> Inventory MCP core
+       |-> LocalMCPClient --stdio----------> Filesystem MCP Server
+       `-> LocalMCPClient --stdio----------> Git MCP Server
+Inventory MCP core (shared by the stdio and HTTP routes above)
     -> Inventory Tool Dispatcher
     -> InventoryService
     -> InventoryRepository
@@ -365,8 +448,12 @@ Implemented:
 - Stock, low-stock, restock, movement history, inactivity, and movement-ranking operations
 - Manual JSON-RPC 2.0 parsing, validation, responses, and standard errors
 - MCP initialization, ping, tool discovery, and tool invocation
-- Six validated inventory tool definitions with structured results
+- Twelve validated inventory tool definitions with structured results
 - Newline-delimited local stdio transport
+- MCP 2025-06-18 Streamable HTTP transport on a configurable localhost endpoint
+- Stateful HTTP initialization sessions and explicit session shutdown
+- Manual HTTP MCP client with JSON/SSE response handling and transport errors
+- Configuration-only Inventory transport selection between stdio and HTTP
 - Redacted interaction logging to stderr
 - Manual local MCP client with IDs, response correlation, timeout, and shutdown
 - Dynamic conversion of discovered MCP tools to OpenAI function definitions
@@ -374,7 +461,7 @@ Implemented:
 - Multi-tool loop with a configurable iteration limit
 - In-memory conversation context for one terminal session
 - Terminal chatbot with `/logs` and `/exit`
-- Multiple independent local MCP stdio connections
+- Multiple independent MCP connections, with Inventory selectable as stdio or HTTP
 - Dynamic cross-server tool discovery and namespaced routing
 - Sandboxed Filesystem MCP integration
 - Repository-restricted Git MCP integration
@@ -384,7 +471,8 @@ Implemented:
 
 Not implemented yet:
 
-- Streamable HTTP transport
 - Remote deployment
+- HTTPS and remote authentication
+- Managed remote database
 - Web interface
 - Wireshark analysis (explicitly outside this development scope)

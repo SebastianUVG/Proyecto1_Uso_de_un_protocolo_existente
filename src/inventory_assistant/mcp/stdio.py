@@ -5,22 +5,12 @@ from __future__ import annotations
 import sys
 from typing import TextIO
 
-from inventory_assistant.config import DatabaseConfig
-from inventory_assistant.inventory.service import InventoryService
-from inventory_assistant.inventory.sqlite import SQLiteInventoryRepository
-
-from .logging import MCPInteractionLogger
+from .factory import build_inventory_server
 from .server import InventoryMCPServer
-from .tools import InventoryToolDispatcher
 
 
 def build_server(error_stream: TextIO | None = None) -> InventoryMCPServer:
-    config = DatabaseConfig.from_env()
-    repository = SQLiteInventoryRepository(config.path)
-    service = InventoryService(repository)
-    tools = InventoryToolDispatcher(service)
-    logger = MCPInteractionLogger(error_stream)
-    return InventoryMCPServer(tools, logger)
+    return build_inventory_server(transport="stdio", log_stream=error_stream)
 
 
 def run_stdio(
@@ -55,4 +45,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

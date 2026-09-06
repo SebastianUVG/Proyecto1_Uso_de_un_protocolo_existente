@@ -10,7 +10,11 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from inventory_assistant.chatbot.session import ChatbotSession
-from inventory_assistant.config import MCPClientConfig
+from inventory_assistant.config import (
+    ExternalMCPConfig,
+    InventoryMCPConfig,
+    MCPClientConfig,
+)
 from inventory_assistant.inventory.bootstrap import initialize_database
 from inventory_assistant.llm import (
     ConversationMessage,
@@ -24,6 +28,7 @@ from inventory_assistant.mcp.manager import (
     MCPServerDefinition,
     MCPServerManager,
     MCPServerManagerError,
+    configured_server_definitions,
 )
 
 
@@ -123,6 +128,33 @@ class MCPServerManagerTests(unittest.TestCase):
         self.assertTrue(all(status.connected for status in statuses.values()))
         self.assertEqual(statuses["filesystem"].tools, ("status", "write_file"))
         self.assertEqual(len(self.manager.list_tools()), 5)
+
+    def test_inventory_transport_selection_changes_only_its_definition(self) -> None:
+        root = Path(self.temporary_directory.name)
+        external = ExternalMCPConfig(
+            filesystem_enabled=False,
+            filesystem_command=("filesystem",),
+            git_enabled=False,
+            git_command=("git",),
+            demo_root=root / "demo",
+            git_repository=root / "demo" / "repository",
+        )
+        inventory = InventoryMCPConfig(
+            transport="http",
+            url="http://127.0.0.1:8123/mcp",
+            http_host="127.0.0.1",
+            http_port=8123,
+        )
+        definitions = configured_server_definitions(
+            external,
+            project_root=root,
+            inventory_config=inventory,
+        )
+        self.assertEqual(len(definitions), 1)
+        self.assertEqual(definitions[0].name, "inventory")
+        self.assertEqual(definitions[0].transport, "http")
+        self.assertEqual(definitions[0].url, inventory.url)
+        self.assertEqual(definitions[0].command, ())
 
     def test_namespaces_repeated_tool_names_and_routes_to_original_names(self) -> None:
         self.manager.connect()

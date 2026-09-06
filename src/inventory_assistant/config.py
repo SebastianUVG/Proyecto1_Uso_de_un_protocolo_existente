@@ -7,6 +7,7 @@ import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 
@@ -26,6 +27,8 @@ DEFAULT_ANTHROPIC_MODEL = "claude-haiku-4-5-20251001"
 DEFAULT_OPENAI_MODEL = "gpt-5.6-luna"
 DEFAULT_MCP_LOG_PATH = Path("logs/mcp.jsonl")
 DEFAULT_MCP_DEMO_ROOT = Path("demo_workspace")
+DEFAULT_INVENTORY_MCP_HTTP_HOST = "127.0.0.1"
+DEFAULT_INVENTORY_MCP_HTTP_PORT = 8000
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,6 +118,44 @@ class MCPClientConfig:
             Path(configured_log_path) if configured_log_path else DEFAULT_MCP_LOG_PATH
         )
         return cls(request_timeout_seconds=timeout, log_path=log_path)
+
+
+@dataclass(frozen=True, slots=True)
+class InventoryMCPConfig:
+    """Transport selection shared by the Inventory MCP host and HTTP server."""
+
+    transport: str
+    url: str
+    http_host: str
+    http_port: int
+
+    @classmethod
+    def from_env(cls) -> "InventoryMCPConfig":
+        transport = (
+            os.getenv("INVENTORY_MCP_TRANSPORT", "stdio").strip().casefold()
+        )
+        if transport not in {"stdio", "http"}:
+            raise ConfigurationError(
+                "INVENTORY_MCP_TRANSPORT must be 'stdio' or 'http'"
+            )
+        host = os.getenv(
+            "INVENTORY_MCP_HTTP_HOST", DEFAULT_INVENTORY_MCP_HTTP_HOST
+        ).strip()
+        if not host:
+            raise ConfigurationError("INVENTORY_MCP_HTTP_HOST cannot be empty")
+        port = _port_from_env(
+            "INVENTORY_MCP_HTTP_PORT", DEFAULT_INVENTORY_MCP_HTTP_PORT
+        )
+        url = os.getenv(
+            "INVENTORY_MCP_URL", f"http://{host}:{port}/mcp"
+        ).strip()
+        _validate_http_url(url)
+        return cls(
+            transport=transport,
+            url=url,
+            http_host=host,
+            http_port=port,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -219,6 +260,13 @@ def _positive_float_from_env(name: str, default: float) -> float:
     return value
 
 
+def _port_from_env(name: str, default: int) -> int:
+    value = _positive_int_from_env(name, default)
+    if value > 65535:
+        raise ConfigurationError(f"{name} must be at most 65535")
+    return value
+
+
 def _boolean_from_env(name: str, default: bool) -> bool:
     raw_value = os.getenv(name)
     if raw_value is None:
@@ -265,4 +313,26 @@ def _validate_demo_paths(
     if not git_repository.is_relative_to(demo_root):
         raise ConfigurationError(
             "GIT_MCP_REPOSITORY must be inside MCP_DEMO_ROOT"
+        )
+
+
+def _validate_http_url(url: str) -> None:
+    try:
+        parsed = urlparse(url)
+        port = parsed.port
+    except ValueError as error:
+        raise ConfigurationError("INVENTORY_MCP_URL is not a valid URL") from error
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+        or parsed.path != "/mcp"
+        or port is not None and not 1 <= port <= 65535
+    ):
+        raise ConfigurationError(
+            "INVENTORY_MCP_URL must be an http(s) URL ending in /mcp "
+            "without credentials, query, or fragment"
         )

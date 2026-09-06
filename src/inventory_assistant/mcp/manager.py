@@ -1,4 +1,4 @@
-"""Small host-side manager for multiple local MCP stdio servers."""
+"""Host-side manager for MCP servers using configurable transports."""
 
 from __future__ import annotations
 
@@ -9,9 +9,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol, Sequence
 
-from inventory_assistant.config import ExternalMCPConfig, MCPClientConfig
+from inventory_assistant.config import (
+    ExternalMCPConfig,
+    InventoryMCPConfig,
+    MCPClientConfig,
+)
 
 from .client import LocalMCPClient, MCPClientError, MCPRemoteError
+from .http_client import HTTPMCPClient
 
 
 TOOL_NAME_SEPARATOR = "__"
@@ -28,6 +33,7 @@ class MCPServerDefinition:
     transport: str = "stdio"
     environment: Mapping[str, str] | None = None
     instructions: str = ""
+    url: str | None = None
 
     def __post_init__(self) -> None:
         if not _SAFE_NAME.fullmatch(self.name):
@@ -36,12 +42,15 @@ class MCPServerDefinition:
             )
         if TOOL_NAME_SEPARATOR in self.name:
             raise ValueError(f"MCP server names cannot contain {TOOL_NAME_SEPARATOR!r}")
-        if not self.command or not all(
-            isinstance(part, str) and part for part in self.command
+        if self.transport not in {"stdio", "http"}:
+            raise ValueError("MCP server transport must be 'stdio' or 'http'")
+        if self.transport == "stdio" and (
+            not self.command
+            or not all(isinstance(part, str) and part for part in self.command)
         ):
-            raise ValueError("MCP server command must contain non-empty strings")
-        if self.transport != "stdio":
-            raise ValueError("Only the stdio transport is supported in this stage")
+            raise ValueError("A stdio MCP server command must contain non-empty strings")
+        if self.transport == "http" and not self.url:
+            raise ValueError("An HTTP MCP server URL is required")
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,7 +103,7 @@ class MCPServerManager:
         names = [server.name for server in servers]
         if len(names) != len(set(names)):
             raise ValueError("MCP server names must be unique")
-        factory = client_factory or _local_client_factory
+        factory = client_factory or _client_factory
         self._definitions = {server.name: server for server in servers}
         self._clients = {
             server.name: factory(server, client_config) for server in servers
@@ -239,15 +248,28 @@ def configured_server_definitions(
     external_config: ExternalMCPConfig,
     *,
     project_root: Path | None = None,
+    inventory_config: InventoryMCPConfig | None = None,
 ) -> tuple[MCPServerDefinition, ...]:
-    """Build local server definitions without embedding machine-specific paths."""
+    """Build server definitions without embedding machine-specific paths."""
 
     root = (project_root or Path.cwd()).resolve()
+    inventory = inventory_config or InventoryMCPConfig(
+        transport="stdio",
+        url="http://127.0.0.1:8000/mcp",
+        http_host="127.0.0.1",
+        http_port=8000,
+    )
     definitions = [
         MCPServerDefinition(
             name="inventory",
-            command=(sys.executable, "-m", "inventory_assistant.mcp.stdio"),
+            command=(
+                (sys.executable, "-m", "inventory_assistant.mcp.stdio")
+                if inventory.transport == "stdio"
+                else ()
+            ),
             working_directory=root,
+            transport=inventory.transport,
+            url=inventory.url if inventory.transport == "http" else None,
             instructions="Use this server for inventory facts and movements",
         )
     ]
@@ -278,10 +300,17 @@ def configured_server_definitions(
     return tuple(definitions)
 
 
-def _local_client_factory(
+def _client_factory(
     server: MCPServerDefinition,
     client_config: MCPClientConfig,
-) -> LocalMCPClient:
+) -> ManagedMCPClient:
+    if server.transport == "http":
+        assert server.url is not None
+        return HTTPMCPClient(
+            client_config,
+            server.url,
+            server_name=server.name,
+        )
     return LocalMCPClient(
         client_config,
         server_name=server.name,
