@@ -1,0 +1,88 @@
+services:
+  inventory-init:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: inventory-assistant:local
+    command:
+      - python
+      - -m
+      - inventory_assistant.inventory.bootstrap
+      - --seed
+    environment:
+      INVENTORY_DB_PATH: /app/data/inventory.db
+    volumes:
+      - inventory-data:/app/data
+    restart: "no"
+
+  inventory-mcp:
+    image: inventory-assistant:local
+    pull_policy: never
+    command:
+      - python
+      - -m
+      - inventory_assistant.mcp.http_server
+    environment:
+      INVENTORY_DB_PATH: /app/data/inventory.db
+      INVENTORY_MCP_HTTP_HOST: 0.0.0.0
+      INVENTORY_MCP_HTTP_PORT: 8000
+    volumes:
+      - inventory-data:/app/data
+    ports:
+      - "127.0.0.1:${INVENTORY_MCP_PUBLISHED_PORT:-8000}:8000"
+    depends_on:
+      inventory-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import urllib.request;
+          urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2).read()
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+  web:
+    image: inventory-assistant:local
+    pull_policy: never
+    command:
+      - python
+      - -m
+      - inventory_assistant.web.app
+    env_file:
+      - .env
+    environment:
+      INVENTORY_MCP_TRANSPORT: http
+      INVENTORY_MCP_URL: http://inventory-mcp:8000/mcp
+      MCP_LOG_PATH: /app/logs/mcp.jsonl
+      WEB_HOST: 0.0.0.0
+      WEB_PORT: 8080
+      FILESYSTEM_MCP_ENABLED: "false"
+      GIT_MCP_ENABLED: "false"
+    ports:
+      - "127.0.0.1:${WEB_PUBLISHED_PORT:-8080}:8080"
+    volumes:
+      - mcp-logs:/app/logs
+    depends_on:
+      inventory-mcp:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import urllib.request;
+          urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=2).read()
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+volumes:
+  inventory-data:
+  mcp-logs:

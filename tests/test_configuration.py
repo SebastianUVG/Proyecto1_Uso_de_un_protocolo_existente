@@ -129,6 +129,24 @@ class InventoryMCPConfigurationTests(unittest.TestCase):
         self.assertEqual(config.http_port, 8000)
         self.assertEqual(config.url, "http://127.0.0.1:8000/mcp")
 
+    def test_cloud_run_port_is_used_without_changing_local_defaults(self) -> None:
+        with patch.dict(os.environ, {"PORT": "9090"}, clear=True):
+            config = InventoryMCPConfig.from_env()
+        self.assertEqual(config.http_host, "0.0.0.0")
+        self.assertEqual(config.http_port, 9090)
+        self.assertEqual(config.url, "http://0.0.0.0:9090/mcp")
+
+    def test_explicit_inventory_port_has_priority_over_cloud_port(self) -> None:
+        environment = {
+            "PORT": "9090",
+            "INVENTORY_MCP_HTTP_HOST": "localhost",
+            "INVENTORY_MCP_HTTP_PORT": "8123",
+        }
+        with patch.dict(os.environ, environment, clear=True):
+            config = InventoryMCPConfig.from_env()
+        self.assertEqual(config.http_host, "localhost")
+        self.assertEqual(config.http_port, 8123)
+
     def test_http_transport_host_port_and_url_are_configurable(self) -> None:
         environment = {
             "INVENTORY_MCP_TRANSPORT": "HTTP",

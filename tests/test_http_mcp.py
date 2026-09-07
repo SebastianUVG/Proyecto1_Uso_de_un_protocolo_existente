@@ -98,6 +98,14 @@ class HTTPMCPIntegrationTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, HTTPStatus.METHOD_NOT_ALLOWED)
         self.assertEqual(raised.exception.headers["Allow"], "POST, DELETE")
 
+    def test_health_endpoint_is_separate_from_mcp(self) -> None:
+        health_url = self.url.removesuffix("/mcp") + "/health"
+        with urlopen(health_url, timeout=2) as response:
+            payload = json.loads(response.read())
+        self.assertEqual(response.status, HTTPStatus.OK)
+        self.assertEqual(payload, {"status": "healthy"})
+        self.assertIsNone(response.headers.get("Mcp-Session-Id"))
+
     def test_client_initializes_pings_and_discovers_exactly_twelve_tools(self) -> None:
         client = self.make_client()
         client.connect()

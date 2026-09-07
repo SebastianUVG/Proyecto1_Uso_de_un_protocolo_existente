@@ -156,6 +156,14 @@ class WebInterfaceTests(unittest.TestCase):
         self.assertIn('document.createElement("table")', script.text)
         self.assertIn("renderMarkdown", script.text)
 
+    def test_health_endpoint_requires_a_ready_runtime(self) -> None:
+        provider = ScriptedProvider([])
+        client, _, _ = self.make_client(provider)
+        with client:
+            result = client.get("/health")
+        self.assertEqual(result.status_code, 200)
+        self.assertEqual(result.json(), {"status": "healthy"})
+
     def test_session_message_markdown_and_conversation_context(self) -> None:
         markdown = (
             "### Products requiring restocking\n\n"

@@ -512,6 +512,200 @@ discard the current conversational context and start a clean in-memory session;
 the existing MCP connections remain available. Sessions are not persisted after
 the Web process stops.
 
+## Running with Docker
+
+Docker Compose is an additional way to run the existing application. It uses
+one Python image with different commands for database initialization, Inventory
+MCP HTTP, and the Web UI. It does not replace the non-Docker commands documented
+above and does not add an MCP SDK.
+
+The container architecture is:
+
+```text
+Browser -> localhost:8080 -> web container
+                              -> ChatbotSession -> OpenAI
+                              -> MCPServerManager
+                              -> http://inventory-mcp:8000/mcp
+                                 -> inventory-mcp container
+                                 -> /app/data/inventory.db
+```
+
+The `web` service does not mount the SQLite volume and cannot access the database
+file directly.
+
+### Requirements
+
+- Docker Desktop or Docker Engine
+- Docker Compose v2 or newer (`docker compose`)
+
+### Setup
+
+Copy the example environment file once and add your own OpenAI API key:
+
+```powershell
+Copy-Item .env.example .env
+```
+
+macOS or Linux:
+
+```bash
+cp .env.example .env
+```
+
+Edit `.env` and set:
+
+```env
+OPENAI_API_KEY=your-real-key
+```
+
+Do not place the key in `Dockerfile`, `compose.yaml`, `.env.example`, or a build
+argument. Compose passes the local `.env` only to the `web` container at runtime.
+The database and Inventory MCP containers never receive the OpenAI key.
+
+The optional published host ports are:
+
+```env
+INVENTORY_MCP_PUBLISHED_PORT=8000
+WEB_PUBLISHED_PORT=8080
+```
+
+Change these only when the host ports are already occupied. Container-to-container
+communication always uses `inventory-mcp:8000`, independently of the published
+host port. Compose publishes both ports only on the host loopback interface, so
+they are not exposed directly to other computers on the local network.
+
+### Start
+
+From the repository root, run:
+
+```powershell
+docker compose up --build
+```
+
+On the first start, the one-shot `inventory-init` service creates the schema and
+inserts the deterministic demonstration seed into the `inventory-data` named
+volume. It executes `bootstrap --seed`, never `--reset`. On later starts the same
+idempotent seed preserves existing products, movements, and stock changes without
+creating duplicates.
+
+Compose waits for initialization to finish successfully, then starts Inventory
+MCP. The Web service starts only after Inventory reports healthy; no arbitrary
+startup sleep is used.
+
+To run in the background instead:
+
+```powershell
+docker compose up --build -d
+```
+
+### Open
+
+Open the Web UI at:
+
+```text
+http://127.0.0.1:8080/
+```
+
+Inventory MCP remains separately available to local MCP clients at:
+
+```text
+http://127.0.0.1:8000/mcp
+```
+
+Health endpoints are intentionally outside MCP:
+
+```text
+http://127.0.0.1:8000/health
+http://127.0.0.1:8080/health
+```
+
+They return only `{"status":"healthy"}` and never call an inventory tool.
+
+### Logs
+
+Follow general container and Inventory MCP protocol logs with:
+
+```powershell
+docker compose logs -f
+```
+
+The Web client's redacted MCP JSONL log is stored in the separate `mcp-logs`
+volume and remains available through **View MCP logs**. Secrets are not written
+to these logs.
+
+### Stop
+
+Stop and remove the containers and network while preserving SQLite and MCP logs:
+
+```powershell
+docker compose down
+```
+
+The next `docker compose up` reuses the same named volumes.
+
+### Reset demo database
+
+This is destructive and must be explicit. To delete the demonstration database
+and all Docker-managed MCP logs, run:
+
+```powershell
+docker compose down -v
+docker compose up --build
+```
+
+The `-v` option removes the named volumes. The next start creates and seeds a
+fresh database. Normal `docker compose down` does **not** delete data.
+
+### Filesystem and Git MCP in Docker
+
+Filesystem and Git MCP remain implemented and available through the existing
+non-Docker workflow. Compose explicitly disables them for this first container
+version, so the runtime image does not need Node.js, npm, Git MCP, or their
+additional dependencies.
+
+### Run the Inventory image independently
+
+The image defaults to Inventory MCP HTTP and does not require Compose. Initialize
+a named volume once, then run the server in the foreground:
+
+```powershell
+docker build -t inventory-assistant:local .
+docker volume create inventory-assistant-data
+docker run --rm -v inventory-assistant-data:/app/data `
+  inventory-assistant:local `
+  python -m inventory_assistant.inventory.bootstrap --seed
+docker run --rm -p 8000:8000 `
+  -e INVENTORY_DB_PATH=/app/data/inventory.db `
+  -e INVENTORY_MCP_HTTP_HOST=0.0.0.0 `
+  -e INVENTORY_MCP_HTTP_PORT=8000 `
+  -v inventory-assistant-data:/app/data `
+  inventory-assistant:local
+```
+
+For future Cloud Run use, Inventory MCP checks the explicit
+`INVENTORY_MCP_HTTP_PORT` first, then Cloud Run's `PORT`, and finally the local
+default `8000`. When `PORT` is present and no host is explicitly configured, it
+binds to `0.0.0.0`; otherwise non-Docker local execution still defaults to
+`127.0.0.1`. This follows the Cloud Run container contract, but no cloud resources
+are created in this stage.
+
+SQLite volumes in Compose are only for local development and tests. A Cloud Run
+container filesystem is ephemeral and must not be treated as durable storage.
+A later deployment stage must select and configure a managed persistence option
+behind the existing `InventoryRepository`; this Docker stage intentionally does
+not migrate to PostgreSQL, Cloud SQL, Firestore, or another database.
+
+### Without Docker
+
+All previous commands remain supported, including:
+
+```powershell
+python -m inventory_assistant.inventory.bootstrap --seed
+python -m inventory_assistant.mcp.http_server
+python -m inventory_assistant.chatbot.cli
+python -m inventory_assistant.web.app
+```
+
 ## Run the tests
 
 ```bash
@@ -571,6 +765,9 @@ Implemented:
 - Safe DOM-based Markdown rendering for headings, emphasis, lists, code, and tables
 - Visual confirmation and cancellation for existing pending inventory operations
 - Browser MCP status and redacted interaction-log views
+- Reproducible non-root Docker image shared by Web and Inventory MCP
+- Docker Compose initialization, health ordering, and persistent local volumes
+- Cloud Run-compatible Inventory host and `PORT` selection
 - Multiple independent MCP connections, with Inventory selectable as stdio or HTTP
 - Dynamic cross-server tool discovery and namespaced routing
 - Sandboxed Filesystem MCP integration

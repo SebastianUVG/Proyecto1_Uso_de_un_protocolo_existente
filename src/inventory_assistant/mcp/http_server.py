@@ -20,6 +20,7 @@ from .server import InventoryMCPServer, ServerState
 
 
 MCP_ENDPOINT = "/mcp"
+HEALTH_ENDPOINT = "/health"
 MAX_REQUEST_BYTES = 1_048_576
 
 
@@ -227,6 +228,15 @@ def create_http_server(
             self._write(application.post(self.rfile.read(length), self.headers))
 
         def do_GET(self) -> None:  # noqa: N802 - required by BaseHTTPRequestHandler
+            if self.path == HEALTH_ENDPOINT:
+                self._write(
+                    HTTPResult(
+                        HTTPStatus.OK,
+                        b'{"status":"healthy"}',
+                        {"Content-Type": "application/json; charset=utf-8"},
+                    )
+                )
+                return
             if self.path != MCP_ENDPOINT:
                 self._write(_http_error(HTTPStatus.NOT_FOUND, "Endpoint not found"))
                 return

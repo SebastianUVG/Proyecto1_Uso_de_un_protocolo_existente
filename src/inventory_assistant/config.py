@@ -140,14 +140,21 @@ class InventoryMCPConfig:
             raise ConfigurationError(
                 "INVENTORY_MCP_TRANSPORT must be 'stdio' or 'http'"
             )
-        host = os.getenv(
-            "INVENTORY_MCP_HTTP_HOST", DEFAULT_INVENTORY_MCP_HTTP_HOST
-        ).strip()
+        cloud_port_is_present = os.getenv("PORT") is not None
+        default_host = (
+            "0.0.0.0" if cloud_port_is_present else DEFAULT_INVENTORY_MCP_HTTP_HOST
+        )
+        host = os.getenv("INVENTORY_MCP_HTTP_HOST", default_host).strip()
         if not host:
             raise ConfigurationError("INVENTORY_MCP_HTTP_HOST cannot be empty")
-        port = _port_from_env(
-            "INVENTORY_MCP_HTTP_PORT", DEFAULT_INVENTORY_MCP_HTTP_PORT
-        )
+        if os.getenv("INVENTORY_MCP_HTTP_PORT") is not None:
+            port = _port_from_env(
+                "INVENTORY_MCP_HTTP_PORT", DEFAULT_INVENTORY_MCP_HTTP_PORT
+            )
+        elif cloud_port_is_present:
+            port = _port_from_env("PORT", DEFAULT_INVENTORY_MCP_HTTP_PORT)
+        else:
+            port = DEFAULT_INVENTORY_MCP_HTTP_PORT
         url = os.getenv(
             "INVENTORY_MCP_URL", f"http://{host}:{port}/mcp"
         ).strip()

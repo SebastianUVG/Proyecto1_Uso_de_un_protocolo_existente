@@ -65,6 +65,12 @@ def create_app(
     def index() -> FileResponse:
         return FileResponse(STATIC_DIRECTORY / "index.html")
 
+    @application.get("/health", include_in_schema=False)
+    def health() -> dict[str, str]:
+        if application.state.runtime is None:
+            raise HTTPException(status_code=503, detail="Web runtime is unavailable")
+        return {"status": "healthy"}
+
     @application.post("/api/session")
     def ensure_session(
         response: Response,
