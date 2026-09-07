@@ -1,0 +1,23 @@
+services:
+  - type: web
+    name: inventory-mcp
+    runtime: docker
+    plan: 0.5c-512mb
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /health
+    envVars:
+      - key: RENDER
+        value: "true"
+      - key: INVENTORY_DB_PATH
+        value: /app/data/inventory.db
+      - key: INVENTORY_MCP_TRANSPORT
+        value: http
+      - key: MCP_ALLOWED_ORIGINS
+        sync: false
+      - key: INVENTORY_MCP_AUTH_TOKEN
+        sync: false
+    disk:
+      name: inventory-data
+      mountPath: /app/data
+      sizeGB: 1

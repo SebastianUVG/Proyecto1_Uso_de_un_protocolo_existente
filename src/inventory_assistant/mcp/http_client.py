@@ -53,6 +53,7 @@ class HTTPMCPClient:
         url: str,
         *,
         server_name: str = DEFAULT_SERVER_NAME,
+        auth_token: str | None = None,
     ) -> None:
         if not url:
             raise ValueError("url must be a non-empty string")
@@ -61,6 +62,9 @@ class HTTPMCPClient:
         self._config = config
         self._url = url
         self._server_name = server_name.strip()
+        self._auth_token = (
+            auth_token.strip() if auth_token and auth_token.strip() else None
+        )
         self._logger = MCPClientFileLogger(config.log_path, transport="http")
         self._id_lock = threading.Lock()
         self._next_id = 1
@@ -117,6 +121,8 @@ class HTTPMCPClient:
                 MCP_SESSION_HEADER: session_id,
                 MCP_VERSION_HEADER: self._negotiated_version or MCP_PROTOCOL_VERSION,
             }
+            if self._auth_token is not None:
+                headers["Authorization"] = f"Bearer {self._auth_token}"
             request = Request(self._url, method="DELETE", headers=headers)
             try:
                 with urlopen(
@@ -255,6 +261,8 @@ class HTTPMCPClient:
             "Content-Type": "application/json",
             "Accept": "application/json, text/event-stream",
         }
+        if self._auth_token is not None:
+            headers["Authorization"] = f"Bearer {self._auth_token}"
         if self._session_id is not None:
             headers[MCP_SESSION_HEADER] = self._session_id
         if self._negotiated_version is not None:

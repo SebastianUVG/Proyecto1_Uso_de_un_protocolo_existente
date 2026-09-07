@@ -34,6 +34,7 @@ class MCPServerDefinition:
     environment: Mapping[str, str] | None = None
     instructions: str = ""
     url: str | None = None
+    auth_token: str | None = None
 
     def __post_init__(self) -> None:
         if not _SAFE_NAME.fullmatch(self.name):
@@ -270,6 +271,7 @@ def configured_server_definitions(
             working_directory=root,
             transport=inventory.transport,
             url=inventory.url if inventory.transport == "http" else None,
+            auth_token=inventory.auth_token,
             instructions="Use this server for inventory facts and movements",
         )
     ]
@@ -310,6 +312,7 @@ def _client_factory(
             client_config,
             server.url,
             server_name=server.name,
+            auth_token=server.auth_token,
         )
     return LocalMCPClient(
         client_config,

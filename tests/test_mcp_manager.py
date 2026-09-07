@@ -144,6 +144,7 @@ class MCPServerManagerTests(unittest.TestCase):
             url="http://127.0.0.1:8123/mcp",
             http_host="127.0.0.1",
             http_port=8123,
+            auth_token="remote-test-token-not-real",
         )
         definitions = configured_server_definitions(
             external,
@@ -154,6 +155,7 @@ class MCPServerManagerTests(unittest.TestCase):
         self.assertEqual(definitions[0].name, "inventory")
         self.assertEqual(definitions[0].transport, "http")
         self.assertEqual(definitions[0].url, inventory.url)
+        self.assertEqual(definitions[0].auth_token, inventory.auth_token)
         self.assertEqual(definitions[0].command, ())
 
     def test_namespaces_repeated_tool_names_and_routes_to_original_names(self) -> None:

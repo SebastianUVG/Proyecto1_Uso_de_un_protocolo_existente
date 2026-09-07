@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import secrets
+import signal
 import sys
 import threading
 from dataclasses import dataclass, field
@@ -12,7 +13,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Callable, Mapping
 from urllib.parse import urlparse
 
-from inventory_assistant.config import InventoryMCPConfig
+from inventory_assistant.config import InventoryMCPConfig, normalize_mcp_origin
 
 from .factory import build_inventory_server
 from .protocol import MCP_PROTOCOL_VERSION, MCP_SESSION_HEADER, MCP_VERSION_HEADER
@@ -40,12 +41,27 @@ class _Session:
 class MCPHTTPApplication:
     """Map HTTP requests to isolated, stateful instances of the MCP core."""
 
-    def __init__(self, server_factory: Callable[[], InventoryMCPServer]) -> None:
+    def __init__(
+        self,
+        server_factory: Callable[[], InventoryMCPServer],
+        *,
+        auth_token: str | None = None,
+        allowed_origins: tuple[str, ...] | None = None,
+    ) -> None:
         self._server_factory = server_factory
+        self._auth_token = auth_token
+        self._allowed_origins = (
+            frozenset(normalize_mcp_origin(origin) for origin in allowed_origins)
+            if allowed_origins is not None
+            else None
+        )
         self._sessions: dict[str, _Session] = {}
         self._sessions_lock = threading.Lock()
 
     def post(self, body: bytes, headers: Mapping[str, str]) -> HTTPResult:
+        auth_error = self._validate_auth(headers)
+        if auth_error is not None:
+            return auth_error
         transport_error = self._validate_post_headers(headers)
         if transport_error is not None:
             return transport_error
@@ -108,6 +124,9 @@ class MCPHTTPApplication:
         )
 
     def delete(self, headers: Mapping[str, str]) -> HTTPResult:
+        auth_error = self._validate_auth(headers)
+        if auth_error is not None:
+            return auth_error
         origin_error = self._validate_origin(headers)
         if origin_error is not None:
             return origin_error
@@ -158,10 +177,34 @@ class MCPHTTPApplication:
             )
         return None
 
-    @staticmethod
-    def _validate_origin(headers: Mapping[str, str]) -> HTTPResult | None:
+    def _validate_auth(self, headers: Mapping[str, str]) -> HTTPResult | None:
+        if self._auth_token is None:
+            return None
+        authorization = _header(headers, "Authorization") or ""
+        scheme, separator, credential = authorization.partition(" ")
+        if (
+            not separator
+            or scheme.casefold() != "bearer"
+            or not secrets.compare_digest(credential.strip(), self._auth_token)
+        ):
+            return _http_error(
+                HTTPStatus.UNAUTHORIZED,
+                "Unauthorized",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        return None
+
+    def _validate_origin(self, headers: Mapping[str, str]) -> HTTPResult | None:
         origin = _header(headers, "Origin")
         if origin is None:
+            return None
+        if self._allowed_origins is not None:
+            try:
+                normalized = normalize_mcp_origin(origin)
+            except ValueError:
+                normalized = None
+            if normalized not in self._allowed_origins:
+                return _http_error(HTTPStatus.FORBIDDEN, "Origin is not allowed")
             return None
         try:
             parsed = urlparse(origin)
@@ -192,12 +235,16 @@ def create_http_server(
     port: int,
     *,
     server_factory: Callable[[], InventoryMCPServer] | None = None,
+    auth_token: str | None = None,
+    allowed_origins: tuple[str, ...] | None = None,
 ) -> InventoryMCPHTTPServer:
     """Create a stoppable HTTP server; passing port 0 selects a test port."""
 
     application = MCPHTTPApplication(
         server_factory
-        or (lambda: build_inventory_server(transport="http", log_stream=sys.stderr))
+        or (lambda: build_inventory_server(transport="http", log_stream=sys.stderr)),
+        auth_token=auth_token,
+        allowed_origins=allowed_origins,
     )
 
     class Handler(BaseHTTPRequestHandler):
@@ -240,7 +287,9 @@ def create_http_server(
             if self.path != MCP_ENDPOINT:
                 self._write(_http_error(HTTPStatus.NOT_FOUND, "Endpoint not found"))
                 return
-            result = application._validate_origin(self.headers)
+            result = application._validate_auth(self.headers)
+            if result is None:
+                result = application._validate_origin(self.headers)
             if result is None:
                 result = HTTPResult(
                     HTTPStatus.METHOD_NOT_ALLOWED,
@@ -281,7 +330,12 @@ def _header(headers: Mapping[str, str], name: str) -> str | None:
     return None
 
 
-def _http_error(status: int, message: str) -> HTTPResult:
+def _http_error(
+    status: int,
+    message: str,
+    *,
+    headers: Mapping[str, str] | None = None,
+) -> HTTPResult:
     body = json.dumps(
         {"error": {"type": "HTTP_TRANSPORT_ERROR", "message": message}},
         separators=(",", ":"),
@@ -289,25 +343,37 @@ def _http_error(status: int, message: str) -> HTTPResult:
     return HTTPResult(
         status,
         body,
-        {"Content-Type": "application/json; charset=utf-8"},
+        {"Content-Type": "application/json; charset=utf-8", **(headers or {})},
     )
 
 
 def main() -> None:
     config = InventoryMCPConfig.from_env()
-    server = create_http_server(config.http_host, config.http_port)
+    server = create_http_server(
+        config.http_host,
+        config.http_port,
+        auth_token=config.auth_token,
+        allowed_origins=config.allowed_origins,
+    )
     print(
         f"Inventory MCP HTTP server listening on "
         f"http://{config.http_host}:{config.http_port}{MCP_ENDPOINT}",
         file=sys.stderr,
         flush=True,
     )
+
+    def request_shutdown(signum: int, frame: object) -> None:
+        del signum, frame
+        threading.Thread(target=server.shutdown, daemon=True).start()
+
+    previous_sigterm = signal.signal(signal.SIGTERM, request_shutdown)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
         server.server_close()
+        signal.signal(signal.SIGTERM, previous_sigterm)
 
 
 if __name__ == "__main__":

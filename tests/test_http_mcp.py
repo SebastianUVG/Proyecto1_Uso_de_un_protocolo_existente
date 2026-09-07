@@ -11,6 +11,7 @@ import time
 import unittest
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from email.message import Message
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -66,6 +67,8 @@ class HTTPMCPIntegrationTests(unittest.TestCase):
                 ),
             )
 
+        self.server_factory = server_factory
+
         self.server = create_http_server(
             "127.0.0.1", 0, server_factory=server_factory
         )
@@ -83,11 +86,18 @@ class HTTPMCPIntegrationTests(unittest.TestCase):
         self.thread.join(timeout=2)
         self.temporary_directory.cleanup()
 
-    def make_client(self, *, timeout: float = 2.0) -> HTTPMCPClient:
+    def make_client(
+        self,
+        *,
+        timeout: float = 2.0,
+        url: str | None = None,
+        auth_token: str | None = None,
+    ) -> HTTPMCPClient:
         client = HTTPMCPClient(
             MCPClientConfig(timeout, self.root / f"client-{len(self.clients)}.jsonl"),
-            self.url,
+            url or self.url,
             server_name="inventory",
+            auth_token=auth_token,
         )
         self.clients.append(client)
         return client
@@ -105,6 +115,64 @@ class HTTPMCPIntegrationTests(unittest.TestCase):
         self.assertEqual(response.status, HTTPStatus.OK)
         self.assertEqual(payload, {"status": "healthy"})
         self.assertIsNone(response.headers.get("Mcp-Session-Id"))
+
+    def test_optional_bearer_auth_protects_mcp_but_not_health(self) -> None:
+        token = "remote-test-token-not-real"
+        secure_url = self.start_additional_server(auth_token=token)
+
+        status, response, _ = self.raw_post(
+            self.initialize_message(),
+            url=secure_url,
+        )
+        self.assertEqual(status, HTTPStatus.UNAUTHORIZED)
+        self.assertEqual(response["error"]["message"], "Unauthorized")
+
+        status, _, _ = self.raw_post(
+            self.initialize_message(),
+            url=secure_url,
+            auth_token="incorrect-token",
+        )
+        self.assertEqual(status, HTTPStatus.UNAUTHORIZED)
+
+        client = self.make_client(url=secure_url, auth_token=token)
+        client.connect()
+        self.assertEqual(len(client.list_tools()), 12)
+        client.ping()
+
+        health_url = secure_url.removesuffix("/mcp") + "/health"
+        with urlopen(health_url, timeout=2) as health:
+            self.assertEqual(health.status, HTTPStatus.OK)
+
+        log_contents = client.log_path.read_text(encoding="utf-8")
+        self.assertNotIn(token, log_contents)
+        self.assertNotIn("Authorization", log_contents)
+        self.assertNotIn(token, self.server_log.getvalue())
+
+    def test_configured_origin_allows_exact_match_and_rejects_others(self) -> None:
+        configured_url = self.start_additional_server(
+            allowed_origins=("https://trusted.example",)
+        )
+        status, _, _ = self.raw_post(
+            self.initialize_message(),
+            url=configured_url,
+            origin="https://trusted.example",
+        )
+        self.assertEqual(status, HTTPStatus.OK)
+
+        status, response, _ = self.raw_post(
+            self.initialize_message(),
+            url=configured_url,
+            origin="https://attacker.example",
+        )
+        self.assertEqual(status, HTTPStatus.FORBIDDEN)
+        self.assertEqual(response["error"]["message"], "Origin is not allowed")
+
+    def test_default_origin_policy_still_accepts_loopback(self) -> None:
+        status, _, _ = self.raw_post(
+            self.initialize_message(),
+            origin="http://localhost:8080",
+        )
+        self.assertEqual(status, HTTPStatus.OK)
 
     def test_client_initializes_pings_and_discovers_exactly_twelve_tools(self) -> None:
         client = self.make_client()
@@ -327,17 +395,59 @@ class HTTPMCPIntegrationTests(unittest.TestCase):
         self.assertIsNone(response)
         return session_id
 
+    @staticmethod
+    def initialize_message() -> dict[str, object]:
+        return {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": MCP_PROTOCOL_VERSION,
+                "capabilities": {},
+                "clientInfo": {"name": "raw-test", "version": "1.0"},
+            },
+        }
+
+    def start_additional_server(
+        self,
+        *,
+        auth_token: str | None = None,
+        allowed_origins: tuple[str, ...] | None = None,
+    ) -> str:
+        server = create_http_server(
+            "127.0.0.1",
+            0,
+            server_factory=self.server_factory,
+            auth_token=auth_token,
+            allowed_origins=allowed_origins,
+        )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+
+        def cleanup() -> None:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
+        self.addCleanup(cleanup)
+        host, port = server.server_address[:2]
+        return f"http://{host}:{port}/mcp"
+
     def raw_post(
         self,
         message: dict,
         *,
         session_id: str | None = None,
         origin: str | None = None,
+        auth_token: str | None = None,
+        url: str | None = None,
     ):
         return self.raw_post_bytes(
             json.dumps(message, separators=(",", ":")).encode("utf-8"),
             session_id=session_id,
             origin=origin,
+            auth_token=auth_token,
+            url=url,
         )
 
     def raw_post_bytes(
@@ -346,6 +456,8 @@ class HTTPMCPIntegrationTests(unittest.TestCase):
         *,
         session_id: str | None = None,
         origin: str | None = None,
+        auth_token: str | None = None,
+        url: str | None = None,
     ):
         headers = {
             "Content-Type": "application/json",
@@ -356,7 +468,9 @@ class HTTPMCPIntegrationTests(unittest.TestCase):
             headers[MCP_VERSION_HEADER] = MCP_PROTOCOL_VERSION
         if origin:
             headers["Origin"] = origin
-        request = Request(self.url, data=body, headers=headers, method="POST")
+        if auth_token:
+            headers["Authorization"] = f"Bearer {auth_token}"
+        request = Request(url or self.url, data=body, headers=headers, method="POST")
         try:
             with urlopen(request, timeout=2) as response:
                 response_body = response.read()
@@ -375,6 +489,94 @@ class HTTPMCPIntegrationTests(unittest.TestCase):
 
 
 class HTTPMCPFailureTests(unittest.TestCase):
+    def test_remote_https_url_and_bearer_token_are_used(self) -> None:
+        class FakeResponse:
+            def __init__(
+                self,
+                status: int,
+                body: bytes = b"",
+                *,
+                session_id: str | None = None,
+            ) -> None:
+                self.status = status
+                self._body = body
+                self.headers = Message()
+                self.headers["Content-Type"] = "application/json"
+                if session_id is not None:
+                    self.headers[MCP_SESSION_HEADER] = session_id
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, traceback) -> None:
+                return None
+
+            def read(self) -> bytes:
+                return self._body
+
+        responses = iter(
+            (
+                FakeResponse(
+                    HTTPStatus.OK,
+                    json.dumps(
+                        {
+                            "jsonrpc": "2.0",
+                            "id": 1,
+                            "result": {
+                                "protocolVersion": MCP_PROTOCOL_VERSION,
+                                "serverInfo": {"name": "remote", "version": "1"},
+                            },
+                        }
+                    ).encode("utf-8"),
+                    session_id="remote-session",
+                ),
+                FakeResponse(HTTPStatus.ACCEPTED),
+                FakeResponse(
+                    HTTPStatus.OK,
+                    b'{"jsonrpc":"2.0","id":2,"result":{"tools":[]}}',
+                ),
+                FakeResponse(HTTPStatus.NO_CONTENT),
+            )
+        )
+        requests: list[Request] = []
+
+        def fake_urlopen(request: Request, *, timeout: float):
+            self.assertEqual(timeout, 2)
+            requests.append(request)
+            return next(responses)
+
+        token = "simulated-remote-token-not-real"
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            log_path = Path(temporary_directory) / "remote.jsonl"
+            client = HTTPMCPClient(
+                MCPClientConfig(2, log_path),
+                "https://inventory.example/mcp",
+                auth_token=token,
+            )
+            with patch(
+                "inventory_assistant.mcp.http_client.urlopen",
+                side_effect=fake_urlopen,
+            ):
+                client.connect()
+                client.close()
+            log_contents = log_path.read_text(encoding="utf-8")
+
+        self.assertEqual(len(requests), 4)
+        self.assertTrue(
+            all(
+                request.full_url == "https://inventory.example/mcp"
+                for request in requests
+            )
+        )
+        self.assertTrue(
+            all(
+                request.get_header("Authorization") == f"Bearer {token}"
+                for request in requests
+            )
+        )
+        self.assertNotIn(token, log_contents)
+        self.assertNotIn("Authorization", log_contents)
+
     def test_unavailable_server_is_a_transport_error(self) -> None:
         client = HTTPMCPClient(
             MCPClientConfig(0.2, Path("logs/test-http-failure.jsonl")),

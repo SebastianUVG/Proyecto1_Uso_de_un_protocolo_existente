@@ -128,8 +128,10 @@ class InventoryMCPConfigurationTests(unittest.TestCase):
         self.assertEqual(config.http_host, "127.0.0.1")
         self.assertEqual(config.http_port, 8000)
         self.assertEqual(config.url, "http://127.0.0.1:8000/mcp")
+        self.assertIsNone(config.allowed_origins)
+        self.assertIsNone(config.auth_token)
 
-    def test_cloud_run_port_is_used_without_changing_local_defaults(self) -> None:
+    def test_render_port_is_used_without_changing_local_defaults(self) -> None:
         with patch.dict(os.environ, {"PORT": "9090"}, clear=True):
             config = InventoryMCPConfig.from_env()
         self.assertEqual(config.http_host, "0.0.0.0")
@@ -146,6 +148,56 @@ class InventoryMCPConfigurationTests(unittest.TestCase):
             config = InventoryMCPConfig.from_env()
         self.assertEqual(config.http_host, "localhost")
         self.assertEqual(config.http_port, 8123)
+
+    def test_render_environment_uses_public_bind_with_local_port_fallback(self) -> None:
+        with patch.dict(os.environ, {"RENDER": "true"}, clear=True):
+            config = InventoryMCPConfig.from_env()
+        self.assertEqual(config.http_host, "0.0.0.0")
+        self.assertEqual(config.http_port, 8000)
+
+    def test_render_host_can_be_explicitly_overridden(self) -> None:
+        environment = {
+            "RENDER": "true",
+            "PORT": "10000",
+            "INVENTORY_MCP_HTTP_HOST": "127.0.0.1",
+        }
+        with patch.dict(os.environ, environment, clear=True):
+            config = InventoryMCPConfig.from_env()
+        self.assertEqual(config.http_host, "127.0.0.1")
+        self.assertEqual(config.http_port, 10000)
+
+    def test_allowed_origins_and_optional_auth_token_are_configurable(self) -> None:
+        environment = {
+            "MCP_ALLOWED_ORIGINS": (
+                "https://client.example, http://localhost:8080/, "
+                "https://client.example"
+            ),
+            "INVENTORY_MCP_AUTH_TOKEN": " test-token-not-real ",
+        }
+        with patch.dict(os.environ, environment, clear=True):
+            config = InventoryMCPConfig.from_env()
+        self.assertEqual(
+            config.allowed_origins,
+            ("https://client.example:443", "http://localhost:8080"),
+        )
+        self.assertEqual(config.auth_token, "test-token-not-real")
+
+    def test_invalid_or_wildcard_allowed_origins_are_rejected(self) -> None:
+        invalid_values = (
+            "*",
+            "https://trusted.example/path",
+            "https://trusted.example,",
+            "not-an-origin",
+        )
+        for value in invalid_values:
+            with self.subTest(value=value):
+                with patch.dict(
+                    os.environ,
+                    {"MCP_ALLOWED_ORIGINS": value},
+                    clear=True,
+                ):
+                    with self.assertRaises(ConfigurationError):
+                        InventoryMCPConfig.from_env()
 
     def test_http_transport_host_port_and_url_are_configurable(self) -> None:
         environment = {

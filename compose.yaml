@@ -26,6 +26,8 @@ services:
       INVENTORY_DB_PATH: /app/data/inventory.db
       INVENTORY_MCP_HTTP_HOST: 0.0.0.0
       INVENTORY_MCP_HTTP_PORT: 8000
+      INVENTORY_MCP_AUTH_TOKEN: ${INVENTORY_MCP_AUTH_TOKEN:-}
+      MCP_ALLOWED_ORIGINS: ${MCP_ALLOWED_ORIGINS:-}
     volumes:
       - inventory-data:/app/data
     ports:
@@ -58,6 +60,7 @@ services:
     environment:
       INVENTORY_MCP_TRANSPORT: http
       INVENTORY_MCP_URL: http://inventory-mcp:8000/mcp
+      INVENTORY_MCP_AUTH_TOKEN: ${INVENTORY_MCP_AUTH_TOKEN:-}
       MCP_LOG_PATH: /app/logs/mcp.jsonl
       WEB_HOST: 0.0.0.0
       WEB_PORT: 8080

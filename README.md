@@ -168,7 +168,8 @@ standard HTTP library, so no HTTP dependency was added. The selected subset is:
 - `MCP-Protocol-Version: 2025-06-18` after negotiation;
 - HTTP `DELETE` to close a session;
 - HTTP `405 Method Not Allowed` for `GET`, because this server does not need an optional standalone SSE channel;
-- validation of any supplied `Origin` header, accepting only loopback origins during this localhost stage.
+- validation of any supplied `Origin` header, using loopback-only defaults or an
+  explicit `MCP_ALLOWED_ORIGINS` allowlist.
 
 The client accepts both JSON responses and finite SSE responses to `POST`, as
 required by Streamable HTTP. The server chooses direct JSON because its current
@@ -665,16 +666,14 @@ additional dependencies.
 
 ### Run the Inventory image independently
 
-The image defaults to Inventory MCP HTTP and does not require Compose. Initialize
-a named volume once, then run the server in the foreground:
+The image defaults to the standalone Inventory MCP HTTP entrypoint and does not
+require Compose. On every start it creates the schema and applies the idempotent
+seed before running the server in the foreground. It never resets the database.
 
 ```powershell
 docker build -t inventory-assistant:local .
 docker volume create inventory-assistant-data
-docker run --rm -v inventory-assistant-data:/app/data `
-  inventory-assistant:local `
-  python -m inventory_assistant.inventory.bootstrap --seed
-docker run --rm -p 8000:8000 `
+docker run --rm -p 127.0.0.1:8000:8000 `
   -e INVENTORY_DB_PATH=/app/data/inventory.db `
   -e INVENTORY_MCP_HTTP_HOST=0.0.0.0 `
   -e INVENTORY_MCP_HTTP_PORT=8000 `
@@ -682,18 +681,157 @@ docker run --rm -p 8000:8000 `
   inventory-assistant:local
 ```
 
-For future Cloud Run use, Inventory MCP checks the explicit
-`INVENTORY_MCP_HTTP_PORT` first, then Cloud Run's `PORT`, and finally the local
-default `8000`. When `PORT` is present and no host is explicitly configured, it
-binds to `0.0.0.0`; otherwise non-Docker local execution still defaults to
-`127.0.0.1`. This follows the Cloud Run container contract, but no cloud resources
-are created in this stage.
+Inventory MCP checks `INVENTORY_MCP_HTTP_PORT` first, then the platform `PORT`,
+and finally `8000`. The host checks `INVENTORY_MCP_HTTP_HOST` first, then uses
+`0.0.0.0` when `RENDER=true` or `PORT` is present, and otherwise keeps the safe
+local default `127.0.0.1`.
 
-SQLite volumes in Compose are only for local development and tests. A Cloud Run
-container filesystem is ephemeral and must not be treated as durable storage.
-A later deployment stage must select and configure a managed persistence option
-behind the existing `InventoryRepository`; this Docker stage intentionally does
-not migrate to PostgreSQL, Cloud SQL, Firestore, or another database.
+## Deploying Inventory MCP to Render
+
+This stage prepares the existing Inventory MCP HTTP server as an independent
+Render Web Service. It does not deploy the Web UI, OpenAI integration, Filesystem
+MCP, or Git MCP. Render terminates public HTTPS and forwards HTTP to the container;
+the Python server does not contain certificates, nginx, or custom TLS handling.
+
+The remote architecture is:
+
+```text
+Local browser -> Local Web UI -> OpenAI
+                            `-> HTTPS -> Render Inventory MCP -> SQLite
+                                                              `-> Persistent Disk
+```
+
+### Requirements and limitations
+
+- A Render account and a Git repository Render can access.
+- A paid Render Web Service plan because persistent disks are not available on
+  the Free plan.
+- One service instance. MCP HTTP sessions are stored in memory and are not shared
+  through Redis or another coordinator. Render disks also attach to only one
+  instance.
+- A 1 GB disk is sufficient for the academic demonstration and can be increased
+  later. Render does not allow decreasing an existing disk.
+
+Only files under the disk mount path survive deploys and restarts. Use these
+matching values:
+
+```text
+Disk name:       inventory-data
+Disk mount path: /app/data
+Disk size:       1 GB
+INVENTORY_DB_PATH=/app/data/inventory.db
+```
+
+The image runs `python -m inventory_assistant.mcp.remote`. That entrypoint applies
+the existing schema and deterministic seed, then starts the existing HTTP server.
+On an empty disk it creates 12 products and 22 demonstration movements. On an
+existing disk it preserves user changes and adds no duplicate seed rows. It never
+uses `--reset`.
+
+### Option A: Render Blueprint
+
+The repository includes `render.yaml` with the Docker Web Service, `/health`, a
+1 GB disk mounted at `/app/data`, and the non-secret environment configuration.
+In Render, choose **New > Blueprint**, connect this repository, and select the
+Blueprint. Render prompts for values marked `sync: false`:
+
+- `INVENTORY_MCP_AUTH_TOKEN`: enter a long random secret.
+- `MCP_ALLOWED_ORIGINS`: enter a comma-separated list of exact trusted browser
+  origins, or leave it empty to retain the loopback-only default.
+
+Review the paid compute and disk cost before applying the Blueprint. No secret is
+stored in `render.yaml`.
+
+### Option B: configure the Dashboard manually
+
+1. Commit and push the project to the Git provider connected to Render.
+2. In the Render Dashboard, choose **New > Web Service** and connect the repository.
+3. Select **Docker**. Keep the repository root as the root directory, use
+   `./Dockerfile`, and leave Docker Command empty so Render uses the image `CMD`.
+4. Choose a paid plan that supports Persistent Disks. The smallest current
+   `0.5 CPU / 512 MB` plan is sufficient for this academic demo.
+5. Under **Advanced > Disk**, add `inventory-data`, mount it at `/app/data`, and
+   select `1 GB`.
+6. Set the HTTP health check path to `/health`.
+7. Add the environment variables from the table below.
+8. Create the Web Service and wait for its Docker build, bootstrap, and health
+   check to complete.
+9. Copy the resulting `https://<service-name>.onrender.com` URL.
+10. Verify `https://<service-name>.onrender.com/health` before configuring a client.
+
+### Render environment variables
+
+| Variable | Render value | Purpose |
+| --- | --- | --- |
+| `RENDER` | `true` | Selects `0.0.0.0` when no explicit host is set. |
+| `INVENTORY_DB_PATH` | `/app/data/inventory.db` | Places SQLite under the disk mount. |
+| `INVENTORY_MCP_TRANSPORT` | `http` | Documents the selected Inventory transport. |
+| `INVENTORY_MCP_AUTH_TOKEN` | A long random secret | Optionally protects every `/mcp` request with HTTP Bearer auth. Recommended remotely. |
+| `MCP_ALLOWED_ORIGINS` | Exact comma-separated origins | Replaces the loopback-only Origin allowlist; never use `*`. |
+| `PORT` | Do not set normally | Render supplies it, currently defaulting to `10000`. |
+| `INVENTORY_MCP_HTTP_HOST` | Do not set normally | Explicit override; otherwise Render selects `0.0.0.0`. |
+| `INVENTORY_MCP_HTTP_PORT` | Do not set normally | Explicit override with priority over `PORT`. |
+
+Configuration priority is:
+
+```text
+Port: INVENTORY_MCP_HTTP_PORT -> PORT -> 8000
+Host: INVENTORY_MCP_HTTP_HOST -> RENDER=true or PORT present -> 127.0.0.1
+```
+
+`MCP_ALLOWED_ORIGINS` applies only when a request includes an `Origin` header.
+Normal server-to-server MCP clients commonly omit that header. If present, it
+must match an allowed origin exactly after normalizing the default HTTP/HTTPS
+port. A missing `Origin` is accepted for those non-browser clients; malformed,
+untrusted, and wildcard origins are rejected. The default policy continues
+accepting only loopback origins when the header is present.
+
+When `INVENTORY_MCP_AUTH_TOKEN` is non-empty, `POST`, `GET`, and `DELETE` requests
+to `/mcp` require `Authorization: Bearer <token>`. `/health` deliberately remains
+unauthenticated and returns only `{"status":"healthy"}`. Authentication happens
+at the HTTP layer before JSON-RPC and the credential is never written to MCP logs.
+
+### Verify the remote server
+
+Health does not require the token:
+
+```powershell
+Invoke-RestMethod https://<service-name>.onrender.com/health
+```
+
+Configure the existing client in the local `.env`:
+
+```env
+INVENTORY_MCP_TRANSPORT=http
+INVENTORY_MCP_URL=https://<service-name>.onrender.com/mcp
+INVENTORY_MCP_AUTH_TOKEN=your-render-secret
+OPENAI_API_KEY=your-local-openai-key
+```
+
+Confirm the MCP lifecycle and exact tool count without calling OpenAI:
+
+```powershell
+python -c "from inventory_assistant.config import InventoryMCPConfig,MCPClientConfig; from inventory_assistant.mcp.http_client import HTTPMCPClient; c=InventoryMCPConfig.from_env(); client=HTTPMCPClient(MCPClientConfig.from_env(),c.url,auth_token=c.auth_token); client.connect(); print('tools:',len(client.list_tools())); client.close()"
+```
+
+The result should be `tools: 12`. An omitted or incorrect token receives HTTP
+`401 Unauthorized`; it is not converted into a JSON-RPC error.
+
+To run the local Web UI against Render:
+
+```powershell
+python -m inventory_assistant.web.app
+```
+
+Open `http://127.0.0.1:8080/`, check that Inventory reports `Connected` with 12
+tools, perform a read-only question, and then perform and confirm a write. Restart
+or redeploy the Render service and retrieve the changed product again to verify
+disk persistence.
+
+Render's external URL is HTTPS, but the container intentionally listens with
+plain HTTP on `0.0.0.0:$PORT` behind Render's proxy. Do not add local certificates
+or expose the bearer token in source control, screenshots, commands committed to
+the repository, or logs.
 
 ### Without Docker
 
@@ -767,7 +905,10 @@ Implemented:
 - Browser MCP status and redacted interaction-log views
 - Reproducible non-root Docker image shared by Web and Inventory MCP
 - Docker Compose initialization, health ordering, and persistent local volumes
-- Cloud Run-compatible Inventory host and `PORT` selection
+- Render-compatible Inventory host and `PORT` selection
+- Standalone idempotent SQLite bootstrap before Inventory MCP HTTP startup
+- Optional HTTP Bearer authentication and configurable exact Origin allowlist
+- Render Blueprint with `/health` and a persistent `/app/data` disk
 - Multiple independent MCP connections, with Inventory selectable as stdio or HTTP
 - Dynamic cross-server tool discovery and namespaced routing
 - Sandboxed Filesystem MCP integration
@@ -779,6 +920,6 @@ Implemented:
 Not implemented yet:
 
 - Remote deployment
-- HTTPS and remote authentication
+- Actual Render deployment (the repository is prepared but no cloud resource was created)
 - Managed remote database
 - Wireshark analysis (explicitly outside this development scope)

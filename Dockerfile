@@ -18,4 +18,4 @@ USER app
 
 EXPOSE 8000 8080
 
-CMD ["python", "-m", "inventory_assistant.mcp.http_server"]
+CMD ["python", "-m", "inventory_assistant.mcp.remote"]

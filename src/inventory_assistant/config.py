@@ -130,6 +130,8 @@ class InventoryMCPConfig:
     url: str
     http_host: str
     http_port: int
+    allowed_origins: tuple[str, ...] | None = None
+    auth_token: str | None = None
 
     @classmethod
     def from_env(cls) -> "InventoryMCPConfig":
@@ -140,9 +142,12 @@ class InventoryMCPConfig:
             raise ConfigurationError(
                 "INVENTORY_MCP_TRANSPORT must be 'stdio' or 'http'"
             )
-        cloud_port_is_present = os.getenv("PORT") is not None
+        platform_port_is_present = os.getenv("PORT") is not None
+        render_environment = _boolean_from_env("RENDER", False)
         default_host = (
-            "0.0.0.0" if cloud_port_is_present else DEFAULT_INVENTORY_MCP_HTTP_HOST
+            "0.0.0.0"
+            if render_environment or platform_port_is_present
+            else DEFAULT_INVENTORY_MCP_HTTP_HOST
         )
         host = os.getenv("INVENTORY_MCP_HTTP_HOST", default_host).strip()
         if not host:
@@ -151,7 +156,7 @@ class InventoryMCPConfig:
             port = _port_from_env(
                 "INVENTORY_MCP_HTTP_PORT", DEFAULT_INVENTORY_MCP_HTTP_PORT
             )
-        elif cloud_port_is_present:
+        elif platform_port_is_present:
             port = _port_from_env("PORT", DEFAULT_INVENTORY_MCP_HTTP_PORT)
         else:
             port = DEFAULT_INVENTORY_MCP_HTTP_PORT
@@ -164,6 +169,8 @@ class InventoryMCPConfig:
             url=url,
             http_host=host,
             http_port=port,
+            allowed_origins=_allowed_origins_from_env(),
+            auth_token=_optional_secret_from_env("INVENTORY_MCP_AUTH_TOKEN"),
         )
 
 
@@ -319,6 +326,63 @@ def _command_arguments_from_env(
     ):
         raise ConfigurationError(f"{name} must be a JSON array of strings")
     return tuple(arguments)
+
+
+def _optional_secret_from_env(name: str) -> str | None:
+    value = os.getenv(name, "").strip()
+    return value or None
+
+
+def _allowed_origins_from_env() -> tuple[str, ...] | None:
+    raw_value = os.getenv("MCP_ALLOWED_ORIGINS")
+    if raw_value is None or not raw_value.strip():
+        return None
+    origins: list[str] = []
+    for item in raw_value.split(","):
+        origin = item.strip()
+        if not origin:
+            raise ConfigurationError(
+                "MCP_ALLOWED_ORIGINS must be a comma-separated list of origins"
+            )
+        normalized = _normalize_origin(origin)
+        if normalized not in origins:
+            origins.append(normalized)
+    return tuple(origins)
+
+
+def normalize_mcp_origin(origin: str) -> str:
+    """Validate and canonicalize one HTTP Origin value."""
+
+    return _normalize_origin(origin)
+
+
+def _normalize_origin(origin: str) -> str:
+    if origin == "*":
+        raise ConfigurationError("MCP_ALLOWED_ORIGINS does not accept '*'")
+    try:
+        parsed = urlparse(origin)
+        port = parsed.port
+    except ValueError as error:
+        raise ConfigurationError(
+            f"Invalid origin in MCP_ALLOWED_ORIGINS: {origin}"
+        ) from error
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path not in {"", "/"}
+        or parsed.params
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ConfigurationError(
+            f"Invalid origin in MCP_ALLOWED_ORIGINS: {origin}"
+        )
+    effective_port = port or (443 if parsed.scheme == "https" else 80)
+    hostname = parsed.hostname.casefold()
+    host = f"[{hostname}]" if ":" in hostname else hostname
+    return f"{parsed.scheme}://{host}:{effective_port}"
 
 
 def _resolve_from(base: Path, path: Path) -> Path:
