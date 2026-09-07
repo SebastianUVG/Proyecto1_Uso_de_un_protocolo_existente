@@ -11,9 +11,12 @@ from typing import Any, TextIO
 
 
 SENSITIVE_KEYS = {
+    "anthropic_api_key",
     "api_key",
     "apikey",
     "authorization",
+    "mcp_session_id",
+    "openai_api_key",
     "password",
     "secret",
     "token",

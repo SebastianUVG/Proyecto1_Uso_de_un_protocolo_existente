@@ -29,6 +29,8 @@ DEFAULT_MCP_LOG_PATH = Path("logs/mcp.jsonl")
 DEFAULT_MCP_DEMO_ROOT = Path("demo_workspace")
 DEFAULT_INVENTORY_MCP_HTTP_HOST = "127.0.0.1"
 DEFAULT_INVENTORY_MCP_HTTP_PORT = 8000
+DEFAULT_WEB_HOST = "127.0.0.1"
+DEFAULT_WEB_PORT = 8080
 
 
 @dataclass(frozen=True, slots=True)
@@ -232,6 +234,21 @@ class ChatbotConfig:
         return cls(
             max_tool_iterations=_positive_int_from_env("MAX_TOOL_ITERATIONS", 5)
         )
+
+
+@dataclass(frozen=True, slots=True)
+class WebConfig:
+    """Local bind configuration for the browser-facing Web UI."""
+
+    host: str
+    port: int
+
+    @classmethod
+    def from_env(cls) -> "WebConfig":
+        host = os.getenv("WEB_HOST", DEFAULT_WEB_HOST).strip()
+        if not host:
+            raise ConfigurationError("WEB_HOST cannot be empty")
+        return cls(host=host, port=_port_from_env("WEB_PORT", DEFAULT_WEB_PORT))
 
 
 def _positive_int_from_env(name: str, default: int) -> int:

@@ -14,6 +14,7 @@ from inventory_assistant.config import (
     ExternalMCPConfig,
     InventoryMCPConfig,
     OpenAIConfig,
+    WebConfig,
     _load_environment_file,
 )
 
@@ -154,6 +155,30 @@ class InventoryMCPConfigurationTests(unittest.TestCase):
                 with patch.dict(os.environ, environment, clear=True):
                     with self.assertRaises(ConfigurationError):
                         InventoryMCPConfig.from_env()
+
+
+class WebConfigurationTests(unittest.TestCase):
+    def test_localhost_and_non_conflicting_port_are_defaults(self) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            config = WebConfig.from_env()
+        self.assertEqual(config.host, "127.0.0.1")
+        self.assertEqual(config.port, 8080)
+
+    def test_host_and_port_are_configurable_and_validated(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"WEB_HOST": "localhost", "WEB_PORT": "8124"},
+            clear=True,
+        ):
+            config = WebConfig.from_env()
+        self.assertEqual(config.host, "localhost")
+        self.assertEqual(config.port, 8124)
+
+        for environment in ({"WEB_HOST": "  "}, {"WEB_PORT": "70000"}):
+            with self.subTest(environment=environment):
+                with patch.dict(os.environ, environment, clear=True):
+                    with self.assertRaises(ConfigurationError):
+                        WebConfig.from_env()
 
 
 if __name__ == "__main__":

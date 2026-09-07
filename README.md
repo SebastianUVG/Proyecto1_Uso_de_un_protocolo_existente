@@ -6,7 +6,7 @@ This repository contains the incremental implementation of a multi-server assist
 
 - Python 3.11 or newer
 - An OpenAI API key for the real chatbot
-- The official `openai` Python package and `python-dotenv`, installed by the setup command below
+- The official `openai` Python package, `python-dotenv`, FastAPI, and Uvicorn, installed by the setup command below
 - Node.js and `npx` for the Filesystem MCP Server
 - Git and the external `mcp-server-git` Python package for the Git MCP Server
 
@@ -408,18 +408,123 @@ Chatbot commands:
 
 MCP logs are stored separately from normal conversational output. Each entry contains timestamp, direction, server, method, request ID, and the redacted JSON-RPC message. API keys and authorization values are never logged.
 
+## Web Interface
+
+The browser interface is a lightweight FastAPI adapter with static HTML, CSS,
+and JavaScript. It does not implement MCP and it does not contain a second
+chatbot. Every browser conversation owns an in-memory `ChatbotSession`, while
+the configured `OpenAILLMProvider` and `MCPServerManager` are reused underneath:
+
+```text
+Browser -> Web API -> ChatbotSession -> OpenAI -> MCPServerManager -> MCP servers
+```
+
+FastAPI was selected only for the browser-facing HTTP routes and static files.
+The existing manual MCP client, JSON-RPC implementation, stdio transport, and
+Streamable HTTP transport remain unchanged. The Web API uses `/api/...` routes;
+the Inventory MCP HTTP server continues to use its separate `/mcp` endpoint.
+
+Install the project and its Web dependencies with the normal setup command:
+
+```powershell
+python -m pip install -e .
+python -m inventory_assistant.inventory.bootstrap --seed
+```
+
+Place the OpenAI configuration in the repository's local `.env` file:
+
+```env
+OPENAI_API_KEY=your-key
+OPENAI_MODEL=gpt-5.6-luna
+WEB_HOST=127.0.0.1
+WEB_PORT=8080
+```
+
+The default Web address is `http://127.0.0.1:8080/`. It intentionally uses a
+different port from Inventory MCP HTTP and binds only to localhost by default.
+
+### Web UI with Inventory MCP stdio
+
+Keep this setting in `.env`:
+
+```env
+INVENTORY_MCP_TRANSPORT=stdio
+```
+
+Only one terminal is needed after SQLite has been prepared. The Web backend
+starts and owns the existing Inventory MCP stdio subprocess:
+
+```powershell
+python -m inventory_assistant.inventory.bootstrap --seed
+python -m inventory_assistant.web.app
+```
+
+Open `http://127.0.0.1:8080/` in a browser. Stop the Web backend with `Ctrl+C`;
+it also closes the MCP connections cleanly.
+
+### Web UI with Inventory MCP HTTP
+
+Use these settings in `.env`:
+
+```env
+INVENTORY_MCP_TRANSPORT=http
+INVENTORY_MCP_URL=http://127.0.0.1:8000/mcp
+INVENTORY_MCP_HTTP_HOST=127.0.0.1
+INVENTORY_MCP_HTTP_PORT=8000
+```
+
+Keep two terminals open. Start Inventory MCP HTTP in terminal 1:
+
+```powershell
+python -m inventory_assistant.inventory.bootstrap --seed
+python -m inventory_assistant.mcp.http_server
+```
+
+Start the Web UI in terminal 2:
+
+```powershell
+python -m inventory_assistant.web.app
+```
+
+Filesystem and Git require no Web-specific setup. When enabled through the
+existing environment variables, their tools are available to the same
+conversation and their connection states appear in the sidebar. When disabled,
+the interface labels them `Disabled` and does not create extra connections for
+status checks.
+
+Assistant responses support headings, bold and italic text, lists, inline code,
+code blocks, and tables. Markdown is converted to DOM nodes with `textContent`;
+LLM output is never assigned to `innerHTML`, so generated HTML or scripts are
+displayed as text instead of being executed. The page also applies a restrictive
+Content Security Policy and loads no frontend code from a CDN.
+
+When the existing `ChatbotSession` pauses a mutable inventory tool, the page
+shows a confirmation card with the preserved tool arguments. **Confirm
+operation** submits `yes` to that pending operation; **Cancel** submits `no` and
+does not call the tool. Buttons are disabled during processing to prevent a
+duplicate action. The confirmation decision remains entirely in the backend.
+
+Use **View MCP logs** to open the technical drawer. It displays timestamp,
+server, transport, direction, method, request ID, and an expandable redacted
+JSON-RPC message. API keys, authorization values, tokens, passwords, and session
+identifiers are removed before data reaches the browser. Use **New chat** to
+discard the current conversational context and start a clean in-memory session;
+the existing MCP connections remain available. Sessions are not persisted after
+the Web process stops.
+
 ## Run the tests
 
 ```bash
+python -m pip install -e ".[test]"
 python -m unittest discover -s tests -v
 ```
 
-The suite covers the domain service, SQLite integration, JSON-RPC, MCP lifecycle, all twelve inventory tools, filtered listings, administrative updates, physical inventory adjustments, transaction rollback, stdio and HTTP clients and servers, request correlation, HTTP sessions, unavailable servers, timeouts, transport parity, multi-server registration, discovery, duplicate tool names, routing, disconnection, clean shutdown, write confirmations and cancellations, tool-use loops, multiple tool calls, context, OpenAI response conversion, and tool errors. It uses fake API clients and never consumes OpenAI API credits. Filesystem and Git tests use temporary or fake clients and never modify the main repository.
+The suite covers the domain service, SQLite integration, JSON-RPC, MCP lifecycle, all twelve inventory tools, filtered listings, administrative updates, physical inventory adjustments, transaction rollback, stdio and HTTP clients and servers, request correlation, HTTP sessions, unavailable servers, timeouts, transport parity, multi-server registration, discovery, duplicate tool names, routing, disconnection, clean shutdown, write confirmations and cancellations, tool-use loops, multiple tool calls, context, OpenAI response conversion, tool errors, Web sessions, browser API routes, Markdown delivery, visual confirmation state, and log redaction. It uses fake API clients and never consumes OpenAI API credits. Filesystem and Git tests use temporary or fake clients and never modify the main repository.
 
 ## Current architecture
 
 ```text
-Terminal chatbot
+Terminal chatbot or Web UI
     -> LLMProvider
     -> OpenAILLMProvider
     -> OpenAI Chat Completions API
@@ -459,8 +564,13 @@ Implemented:
 - Dynamic conversion of discovered MCP tools to OpenAI function definitions
 - OpenAI Chat Completions API adapter
 - Multi-tool loop with a configurable iteration limit
-- In-memory conversation context for one terminal session
+- Isolated in-memory conversation context for terminal and browser sessions
 - Terminal chatbot with `/logs` and `/exit`
+- FastAPI Web backend that reuses `ChatbotSession` and `MCPServerManager`
+- Responsive static HTML/CSS/JavaScript chat interface
+- Safe DOM-based Markdown rendering for headings, emphasis, lists, code, and tables
+- Visual confirmation and cancellation for existing pending inventory operations
+- Browser MCP status and redacted interaction-log views
 - Multiple independent MCP connections, with Inventory selectable as stdio or HTTP
 - Dynamic cross-server tool discovery and namespaced routing
 - Sandboxed Filesystem MCP integration
@@ -474,5 +584,4 @@ Not implemented yet:
 - Remote deployment
 - HTTPS and remote authentication
 - Managed remote database
-- Web interface
 - Wireshark analysis (explicitly outside this development scope)
