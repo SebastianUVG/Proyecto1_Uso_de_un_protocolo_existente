@@ -526,7 +526,7 @@ WEB_PORT=8080
 The default Web address is `http://127.0.0.1:8080/`. It intentionally uses a
 different port from Inventory MCP HTTP and binds only to localhost by default.
 
-### Web UI with Inventory MCP stdio
+### Local Inventory MCP (stdio)
 
 Keep this setting in `.env`:
 
@@ -545,7 +545,26 @@ python -m inventory_assistant.web.app
 Open `http://127.0.0.1:8080/` in a browser. Stop the Web backend with `Ctrl+C`;
 it also closes the MCP connections cleanly.
 
-### Web UI with Inventory MCP HTTP
+`INVENTORY_MCP_TRANSPORT` is the source of truth. In `stdio` mode,
+`INVENTORY_MCP_URL` is not used for the active connection even if a previous
+remote URL remains in `.env`. The Web sidebar reports `Local · stdio`.
+
+### Remote Inventory MCP
+
+To connect the host to a deployed Inventory MCP server, use:
+
+```env
+INVENTORY_MCP_TRANSPORT=http
+INVENTORY_MCP_URL=https://<server>/mcp
+INVENTORY_MCP_AUTH_TOKEN=<secret>
+```
+
+Start only the Web UI/chatbot host. It does not start the local Inventory MCP
+subprocess in this mode; it connects to the configured remote endpoint. The
+sidebar reports `Remote · HTTPS`. Keep the real token only in `.env`, which is
+ignored by Git, and never place it in `.env.example`.
+
+### Inventory MCP over HTTP localhost
 
 Use these settings in `.env`:
 
@@ -569,11 +588,14 @@ Start the Web UI in terminal 2:
 python -m inventory_assistant.web.app
 ```
 
+Although the transport is HTTP, a `localhost`, `127.0.0.1`, or `::1` endpoint
+is still local. The Web sidebar therefore reports `Local · HTTP`.
+
 Filesystem and Git require no Web-specific setup. When enabled through the
 existing environment variables, their tools are available to the same
 conversation and their connection states appear in the sidebar. When disabled,
-the interface labels them `Disabled` and does not create extra connections for
-status checks.
+the interface labels them `Disabled` while still showing their configured local
+stdio mode. No extra connection is created for status checks.
 
 Assistant responses support headings, bold and italic text, lists, inline code,
 code blocks, and tables. Markdown is converted to DOM nodes with `textContent`;

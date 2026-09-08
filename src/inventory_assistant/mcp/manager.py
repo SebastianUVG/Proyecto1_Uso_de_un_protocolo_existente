@@ -65,6 +65,7 @@ class MCPServerStatus:
     connected: bool
     tools: tuple[str, ...]
     error: str | None = None
+    url: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,6 +136,7 @@ class MCPServerManager:
                     tool["name"] for tool in self._tools_by_server[name]
                 ),
                 error=self._errors[name],
+                url=self._definitions[name].url,
             )
             for name in self._definitions
         )

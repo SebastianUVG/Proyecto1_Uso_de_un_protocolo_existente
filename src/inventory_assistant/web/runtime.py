@@ -8,8 +8,10 @@ import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
+from ipaddress import ip_address
 from pathlib import Path
 from typing import Any, Callable, Protocol, Sequence
+from urllib.parse import urlparse
 
 from inventory_assistant.chatbot.session import ChatbotSession, PendingOperation
 from inventory_assistant.config import (
@@ -172,22 +174,29 @@ class WebRuntime:
             status = current.get(name)
             if name not in self.configured_servers:
                 state = "Disabled"
-                transport = None
+                transport = status.transport if status is not None else "stdio"
+                url = status.url if status is not None else None
                 tool_count = 0
             elif status is not None and status.connected:
                 state = "Connected"
                 transport = status.transport
+                url = status.url
                 tool_count = len(status.tools)
             else:
                 state = "Error"
                 transport = status.transport if status is not None else None
+                url = status.url if status is not None else None
                 tool_count = len(status.tools) if status is not None else 0
+            connection = describe_mcp_connection(transport, url)
             result.append(
                 {
                     "name": _display_server_name(name),
                     "key": name,
                     "state": state,
                     "transport": transport,
+                    "location": connection.location,
+                    "protocol": connection.protocol,
+                    "mode_label": connection.label,
                     "tool_count": tool_count,
                     "error": status.error if status is not None else None,
                 }
@@ -286,3 +295,50 @@ def _safe_scalar(value: Any) -> str | int | float | bool | None:
 
 def _display_server_name(name: str) -> str:
     return name.replace("-", " ").replace("_", " ").title()
+
+
+@dataclass(frozen=True, slots=True)
+class MCPConnectionDescription:
+    """Safe, display-ready description of an MCP server connection."""
+
+    location: str
+    protocol: str
+
+    @property
+    def label(self) -> str:
+        return f"{self.location.title()} · {self.protocol}"
+
+
+def describe_mcp_connection(
+    transport: str | None,
+    url: str | None = None,
+) -> MCPConnectionDescription:
+    """Classify an active MCP transport without DNS or exposing its endpoint."""
+
+    normalized_transport = (transport or "").strip().casefold()
+    if normalized_transport == "stdio":
+        return MCPConnectionDescription(location="local", protocol="stdio")
+
+    if normalized_transport == "http":
+        parsed = urlparse(url or "")
+        hostname = parsed.hostname
+        location = "local" if _is_loopback_host(hostname) else "remote"
+        protocol = "HTTPS" if parsed.scheme.casefold() == "https" else "HTTP"
+        return MCPConnectionDescription(location=location, protocol=protocol)
+
+    return MCPConnectionDescription(
+        location="unknown",
+        protocol=normalized_transport or "unknown",
+    )
+
+
+def _is_loopback_host(hostname: str | None) -> bool:
+    if hostname is None:
+        return False
+    normalized = hostname.rstrip(".").casefold()
+    if normalized == "localhost":
+        return True
+    try:
+        return ip_address(normalized).is_loopback
+    except ValueError:
+        return False

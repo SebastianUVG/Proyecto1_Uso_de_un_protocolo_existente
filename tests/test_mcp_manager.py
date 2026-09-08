@@ -161,6 +161,36 @@ class MCPServerManagerTests(unittest.TestCase):
         self.assertEqual(definitions[0].auth_token, inventory.auth_token)
         self.assertEqual(definitions[0].command, ())
 
+    def test_stdio_inventory_ignores_a_configured_remote_url(self) -> None:
+        root = Path(self.temporary_directory.name)
+        external = ExternalMCPConfig(
+            filesystem_enabled=False,
+            filesystem_command=("filesystem",),
+            git_enabled=False,
+            git_command=("git",),
+            demo_root=root / "demo",
+            git_repository=root / "demo" / "repository",
+        )
+        inventory = InventoryMCPConfig(
+            transport="stdio",
+            url="https://example.onrender.com/mcp",
+            http_host="127.0.0.1",
+            http_port=8000,
+        )
+
+        definition = configured_server_definitions(
+            external,
+            project_root=root,
+            inventory_config=inventory,
+        )[0]
+
+        self.assertEqual(definition.transport, "stdio")
+        self.assertIsNone(definition.url)
+        self.assertEqual(
+            definition.command,
+            (sys.executable, "-m", "inventory_assistant.mcp.stdio"),
+        )
+
     def test_namespaces_repeated_tool_names_and_routes_to_original_names(self) -> None:
         self.manager.connect()
         names = [item["name"] for item in self.manager.list_tools()]

@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
@@ -25,7 +27,7 @@ from inventory_assistant.mcp.manager import (
     MCPServerStatus,
 )
 from inventory_assistant.web.app import SESSION_COOKIE, create_app
-from inventory_assistant.web.runtime import WebRuntime
+from inventory_assistant.web.runtime import WebRuntime, describe_mcp_connection
 
 
 READ_TOOL = {
@@ -66,8 +68,18 @@ class ErrorProvider:
 
 
 class FakeManager:
-    def __init__(self, *, transport: str = "stdio") -> None:
+    def __init__(
+        self,
+        *,
+        transport: str = "stdio",
+        url: str | None = None,
+    ) -> None:
         self.transport = transport
+        self.url = (
+            url
+            if url is not None
+            else "http://127.0.0.1:8000/mcp" if transport == "http" else None
+        )
         self.calls: list[tuple[str, dict]] = []
         self.closed = False
 
@@ -79,6 +91,7 @@ class FakeManager:
                 self.transport,
                 True,
                 (READ_TOOL["name"], WRITE_TOOL["name"]),
+                url=self.url,
             ),
         )
 
@@ -116,6 +129,17 @@ class DynamicStatusManager(FakeManager):
             ),
             MCPServerStatus(
                 "hotel", "stdio", False, (), "tools/list failed"
+            ),
+            MCPServerStatus(
+                "warehouse-analytics", "stdio", True, ("warehouse__report",)
+            ),
+            MCPServerStatus(
+                "remote-audit",
+                "http",
+                False,
+                (),
+                error="tools/list failed",
+                url="https://audit.example/mcp",
             ),
         )
 
@@ -288,8 +312,54 @@ class WebInterfaceTests(unittest.TestCase):
         statuses = {item["key"]: item for item in result.json()["servers"]}
         self.assertEqual(statuses["inventory"]["state"], "Connected")
         self.assertEqual(statuses["inventory"]["transport"], "http")
+        self.assertEqual(statuses["inventory"]["location"], "local")
+        self.assertEqual(statuses["inventory"]["protocol"], "HTTP")
         self.assertEqual(statuses["filesystem"]["state"], "Disabled")
+        self.assertEqual(statuses["filesystem"]["mode_label"], "Local · stdio")
         self.assertEqual(statuses["git"]["state"], "Disabled")
+
+    def test_connection_description_uses_active_transport_and_loopback_endpoint(self) -> None:
+        cases = (
+            ("stdio", "https://example.onrender.com/mcp", "Local · stdio"),
+            ("http", "https://example.onrender.com/mcp", "Remote · HTTPS"),
+            ("http", "http://localhost:8000/mcp", "Local · HTTP"),
+            ("http", "http://127.0.0.1:8000/mcp", "Local · HTTP"),
+            ("http", "http://[::1]:8000/mcp", "Local · HTTP"),
+        )
+        for transport, url, expected in cases:
+            with self.subTest(transport=transport, url=url):
+                self.assertEqual(
+                    describe_mcp_connection(transport, url).label,
+                    expected,
+                )
+
+    def test_status_api_returns_safe_connection_metadata_for_three_inventory_modes(self) -> None:
+        scenarios = (
+            ("stdio", "https://example.onrender.com/mcp", "local", "stdio"),
+            ("http", "https://example.onrender.com/mcp", "remote", "HTTPS"),
+            ("http", "http://127.0.0.1:8000/mcp", "local", "HTTP"),
+        )
+        for transport, url, location, protocol in scenarios:
+            with self.subTest(transport=transport, url=url):
+                provider = ScriptedProvider([])
+                manager = FakeManager(transport=transport, url=url)
+                runtime = WebRuntime(
+                    provider,
+                    manager,
+                    log_path=self.log_path,
+                    configured_servers=("inventory",),
+                )
+                client = TestClient(create_app(lambda: runtime))
+                with client:
+                    self.initialize(client)
+                    payload = client.get("/api/status").json()
+                inventory = next(
+                    item for item in payload["servers"] if item["key"] == "inventory"
+                )
+                self.assertEqual(inventory["location"], location)
+                self.assertEqual(inventory["protocol"], protocol)
+                self.assertNotIn("url", inventory)
+                self.assertNotIn(url, json.dumps(payload))
 
     def test_mcp_status_renders_dynamic_server_states(self) -> None:
         provider = ScriptedProvider([])
@@ -298,8 +368,20 @@ class WebInterfaceTests(unittest.TestCase):
             provider,
             manager,
             log_path=self.log_path,
-            configured_servers=("inventory", "academic-planner", "hotel"),
-            known_servers=("academic-planner", "hotel", "future-server"),
+            configured_servers=(
+                "inventory",
+                "academic-planner",
+                "hotel",
+                "warehouse-analytics",
+                "remote-audit",
+            ),
+            known_servers=(
+                "academic-planner",
+                "hotel",
+                "warehouse-analytics",
+                "remote-audit",
+                "future-server",
+            ),
         )
         client = TestClient(create_app(lambda: runtime))
         with client:
@@ -308,10 +390,64 @@ class WebInterfaceTests(unittest.TestCase):
 
         statuses = {item["key"]: item for item in result.json()["servers"]}
         self.assertEqual(statuses["academic-planner"]["state"], "Connected")
+        self.assertEqual(
+            statuses["academic-planner"]["mode_label"], "Local · stdio"
+        )
         self.assertEqual(statuses["academic-planner"]["tool_count"], 1)
         self.assertEqual(statuses["hotel"]["state"], "Error")
+        self.assertEqual(statuses["hotel"]["mode_label"], "Local · stdio")
         self.assertEqual(statuses["hotel"]["error"], "tools/list failed")
+        self.assertEqual(statuses["warehouse-analytics"]["state"], "Connected")
+        self.assertEqual(
+            statuses["warehouse-analytics"]["mode_label"], "Local · stdio"
+        )
+        self.assertEqual(statuses["remote-audit"]["state"], "Error")
+        self.assertEqual(
+            statuses["remote-audit"]["mode_label"], "Remote · HTTPS"
+        )
         self.assertEqual(statuses["future-server"]["state"], "Disabled")
+        self.assertEqual(
+            statuses["future-server"]["mode_label"], "Local · stdio"
+        )
+
+    def test_status_api_does_not_expose_provider_or_mcp_secrets(self) -> None:
+        openai_secret = "sk-openai-web-status-secret"
+        auth_secret = "inventory-auth-web-status-secret"
+        provider = ScriptedProvider([])
+        manager = FakeManager(
+            transport="http",
+            url="https://inventory.example/mcp",
+        )
+        runtime = WebRuntime(
+            provider,
+            manager,
+            log_path=self.log_path,
+            configured_servers=("inventory",),
+        )
+        client = TestClient(create_app(lambda: runtime))
+        with patch.dict(
+            os.environ,
+            {
+                "OPENAI_API_KEY": openai_secret,
+                "INVENTORY_MCP_AUTH_TOKEN": auth_secret,
+            },
+            clear=False,
+        ):
+            with client:
+                self.initialize(client)
+                payload = client.get("/api/status").text
+
+        self.assertNotIn(openai_secret, payload)
+        self.assertNotIn(auth_secret, payload)
+
+    def test_web_ui_renders_backend_connection_label_without_name_inference(self) -> None:
+        provider = ScriptedProvider([])
+        client, _, _ = self.make_client(provider)
+        with client:
+            script = client.get("/static/app.js").text
+        self.assertIn('meta.textContent = server.mode_label || "Mode unavailable"', script)
+        self.assertNotIn("onrender", script.casefold())
+        self.assertNotIn("localhost", script.casefold())
 
     def test_missing_session_and_provider_errors_are_safe(self) -> None:
         client, _, _ = self.make_client(ErrorProvider())

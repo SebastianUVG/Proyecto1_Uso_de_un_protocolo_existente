@@ -262,17 +262,22 @@ function renderServerStatus(servers) {
     name.className = "server-name";
     name.textContent = server.name;
     const meta = document.createElement("span");
-    meta.className = "server-meta";
+    meta.className = "server-mode";
+    meta.textContent = server.mode_label || "Mode unavailable";
+    const detail = document.createElement("span");
+    detail.className = "server-meta";
     if (server.state === "Error" && server.error) {
-      meta.textContent = `${server.transport || "stdio"} - ${server.error}`;
-      meta.title = server.error;
+      detail.textContent = server.error;
+      detail.title = server.error;
+    } else if (server.state === "Disabled") {
+      detail.textContent = "Not configured";
     } else {
-      meta.textContent = server.transport ? `${server.transport} - ${server.tool_count} tools` : "Not configured";
+      detail.textContent = `${server.tool_count} tools`;
     }
     const stateLabel = document.createElement("span");
-    stateLabel.className = "server-state-label";
+    stateLabel.className = `server-state-label ${server.state.toLowerCase()}`;
     stateLabel.textContent = server.state;
-    row.append(dot, name, meta, stateLabel);
+    row.append(dot, name, meta, detail, stateLabel);
     elements.serverList.append(row);
   }
 }
