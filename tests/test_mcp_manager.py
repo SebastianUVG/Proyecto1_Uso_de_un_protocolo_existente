@@ -11,6 +11,7 @@ from typing import Any, Sequence
 
 from inventory_assistant.chatbot.session import ChatbotSession
 from inventory_assistant.config import (
+    ConfiguredMCPServer,
     ExternalMCPConfig,
     InventoryMCPConfig,
     MCPClientConfig,
@@ -27,7 +28,6 @@ from inventory_assistant.mcp.client import LocalMCPClient, MCPRemoteError
 from inventory_assistant.mcp.manager import (
     MCPServerDefinition,
     MCPServerManager,
-    MCPServerManagerError,
     configured_server_definitions,
 )
 
@@ -49,6 +49,7 @@ class FakeManagedClient:
         self.close_count = 0
         self.calls: list[tuple[str, dict[str, Any]]] = []
         self.fail_connect = False
+        self.fail_list = False
         self.fail_close = False
 
     def connect(self) -> None:
@@ -58,6 +59,8 @@ class FakeManagedClient:
         self.is_connected = True
 
     def list_tools(self, *, refresh: bool = False) -> list[dict[str, Any]]:
+        if self.fail_list:
+            raise RuntimeError("tools/list failure")
         return self.tools
 
     def call_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -190,13 +193,92 @@ class MCPServerManagerTests(unittest.TestCase):
         self.assertTrue(all(client.close_count == 1 for client in self.clients.values()))
         self.assertTrue(all(not status.connected for status in self.manager.statuses))
 
-    def test_startup_failure_closes_servers_already_connected(self) -> None:
+    def test_startup_failure_is_isolated_and_others_remain_available(self) -> None:
         self.clients["filesystem"].fail_connect = True
-        with self.assertRaises(MCPServerManagerError):
-            self.manager.connect()
-        self.assertEqual(self.clients["inventory"].close_count, 1)
-        self.assertFalse(self.clients["inventory"].is_connected)
-        self.assertEqual(self.clients["git"].connect_count, 0)
+        self.manager.connect()
+        statuses = {status.name: status for status in self.manager.statuses}
+        self.assertTrue(statuses["inventory"].connected)
+        self.assertFalse(statuses["filesystem"].connected)
+        self.assertIn("startup failure", statuses["filesystem"].error)
+        self.assertTrue(statuses["git"].connected)
+        self.assertEqual(len(self.manager.list_tools()), 3)
+
+    def test_tools_list_failure_is_isolated_and_reported(self) -> None:
+        self.clients["git"].fail_list = True
+        self.manager.connect()
+        statuses = {status.name: status for status in self.manager.statuses}
+        self.assertTrue(statuses["inventory"].connected)
+        self.assertTrue(statuses["filesystem"].connected)
+        self.assertFalse(statuses["git"].connected)
+        self.assertIn("tools/list failure", statuses["git"].error)
+        self.assertEqual(self.clients["git"].close_count, 1)
+
+    def test_unsafe_or_colliding_original_names_get_stable_public_names(self) -> None:
+        root = Path(self.temporary_directory.name)
+        client = FakeManagedClient(
+            "hotel",
+            [tool("search.rooms"), tool("search rooms")],
+        )
+        manager = MCPServerManager(
+            self.config,
+            (
+                MCPServerDefinition(
+                    name="hotel",
+                    command=("fake",),
+                    working_directory=root,
+                ),
+            ),
+            client_factory=lambda definition, config: client,
+        )
+        with manager:
+            public_names = [item["name"] for item in manager.list_tools()]
+            self.assertEqual(public_names[0], "hotel__search_rooms")
+            self.assertRegex(
+                public_names[1], r"^hotel__search_rooms_[0-9a-f]{8}$"
+            )
+            manager.call_tool(public_names[1], {"guest": "Ada"})
+        self.assertEqual(client.calls, [("search rooms", {"guest": "Ada"})])
+
+    def test_configured_definitions_add_only_enabled_arbitrary_servers(self) -> None:
+        root = Path(self.temporary_directory.name)
+        external = ExternalMCPConfig(
+            filesystem_enabled=False,
+            filesystem_command=("filesystem",),
+            git_enabled=False,
+            git_command=("git",),
+            demo_root=root / "demo",
+            git_repository=root / "demo" / "repository",
+            servers=(
+                ConfiguredMCPServer(
+                    name="academic-planner",
+                    enabled=True,
+                    command="academic-python",
+                    args=("-m", "src.server"),
+                    working_directory=root / "academic",
+                    environment={"ACADEMIC_DB": "demo.db"},
+                    instructions="Plan studies",
+                ),
+                ConfiguredMCPServer(
+                    name="hotel",
+                    enabled=False,
+                    command="hotel-python",
+                    args=("-m", "hotel_mcp"),
+                    working_directory=root / "hotel",
+                    environment={},
+                ),
+            ),
+        )
+        definitions = configured_server_definitions(external, project_root=root)
+        by_name = {definition.name: definition for definition in definitions}
+        self.assertEqual(set(by_name), {"inventory", "academic-planner"})
+        self.assertEqual(
+            by_name["academic-planner"].command,
+            ("academic-python", "-m", "src.server"),
+        )
+        self.assertEqual(
+            by_name["academic-planner"].environment,
+            {"ACADEMIC_DB": "demo.db"},
+        )
 
     def test_fake_llm_coordinates_inventory_filesystem_and_git_tools(self) -> None:
         self.manager.connect()

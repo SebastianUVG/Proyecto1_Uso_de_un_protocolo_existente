@@ -1,0 +1,22 @@
+{
+  "servers": [
+    {
+      "name": "academic-planner",
+      "enabled": false,
+      "command": "${ACADEMIC_PLANNER_PYTHON}",
+      "args": ["-m", "src.server"],
+      "cwd": "../academic-planner-mcp",
+      "env": {},
+      "instructions": "Use this server for academic tasks, workload, and study planning."
+    },
+    {
+      "name": "hotel",
+      "enabled": false,
+      "command": "${HOTEL_MCP_PYTHON}",
+      "args": ["-m", "hotel_mcp"],
+      "cwd": "../hotel-mcp-server",
+      "env": {},
+      "instructions": "Use this server for hotel availability and operations."
+    }
+  ]
+}

@@ -1,5 +1,6 @@
 # Local configuration and secrets
 .env
+config/external_mcp_servers.json
 
 # Generated databases and temporary integration-test data
 data/

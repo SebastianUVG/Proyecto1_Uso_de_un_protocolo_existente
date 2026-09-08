@@ -20,12 +20,12 @@ from inventory_assistant.mcp.client import MCPClientError, MCPRemoteError
 
 SYSTEM_PROMPT = """You are a helpful assistant connected to several MCP servers.
 Answer general questions directly from your knowledge. Use the available tools
-when a request requires current inventory data, controlled filesystem operations,
-or Git operations. Tool names and descriptions identify their source server and
-scope. Choose tools through their schemas, never invent tool results, and coordinate
-multiple tools when the request requires it. Explain results in the user's language.
-Preserve conversational context and use it to understand follow-up references. Do
-not claim that an operation succeeded when a tool result reports an error."""
+when a request requires data or actions owned by a connected service. Tool names
+and descriptions identify their source server and scope. Choose tools through
+their schemas, never invent tool results, and coordinate multiple tools and servers
+when the request requires it. Explain results in the user's language. Preserve
+conversational context and use it to understand follow-up references. Do not claim
+that an operation succeeded when a tool result reports an error."""
 
 MUTATING_INVENTORY_TOOLS = frozenset(
     {

@@ -138,12 +138,16 @@ class WebRuntime:
         *,
         log_path: Path,
         configured_servers: Sequence[str],
+        known_servers: Sequence[str] = STANDARD_SERVERS,
         max_tool_iterations: int = 5,
     ) -> None:
         self.provider = provider
         self.manager = manager
         self.log_path = log_path
         self.configured_servers = tuple(configured_servers)
+        self.known_servers = tuple(
+            dict.fromkeys((*STANDARD_SERVERS, *known_servers))
+        )
         self.sessions = BrowserSessionStore(
             lambda: ChatbotSession(
                 self.provider,
@@ -159,7 +163,12 @@ class WebRuntime:
     def server_statuses(self) -> list[dict[str, Any]]:
         current = {status.name: status for status in self.manager.statuses}
         result: list[dict[str, Any]] = []
-        for name in STANDARD_SERVERS:
+        server_names = tuple(
+            dict.fromkeys(
+                (*self.known_servers, *self.configured_servers, *current)
+            )
+        )
+        for name in server_names:
             status = current.get(name)
             if name not in self.configured_servers:
                 state = "Disabled"
@@ -175,11 +184,12 @@ class WebRuntime:
                 tool_count = len(status.tools) if status is not None else 0
             result.append(
                 {
-                    "name": name.capitalize(),
+                    "name": _display_server_name(name),
                     "key": name,
                     "state": state,
                     "transport": transport,
                     "tool_count": tool_count,
+                    "error": status.error if status is not None else None,
                 }
             )
         return result
@@ -235,6 +245,7 @@ def build_runtime_from_env() -> WebRuntime:
         manager,
         log_path=mcp_config.log_path,
         configured_servers=[definition.name for definition in definitions],
+        known_servers=[server.name for server in external_config.servers],
         max_tool_iterations=chatbot_config.max_tool_iterations,
     )
 
@@ -271,3 +282,7 @@ def _pending_view(pending: PendingOperation | None) -> dict[str, Any] | None:
 
 def _safe_scalar(value: Any) -> str | int | float | bool | None:
     return value if value is None or isinstance(value, (str, int, float, bool)) else None
+
+
+def _display_server_name(name: str) -> str:
+    return name.replace("-", " ").replace("_", " ").title()

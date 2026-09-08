@@ -106,6 +106,20 @@ class FakeManager:
         self.closed = True
 
 
+class DynamicStatusManager(FakeManager):
+    @property
+    def statuses(self):
+        return (
+            *super().statuses,
+            MCPServerStatus(
+                "academic-planner", "stdio", True, ("academic-planner__plan",)
+            ),
+            MCPServerStatus(
+                "hotel", "stdio", False, (), "tools/list failed"
+            ),
+        )
+
+
 def response(*blocks) -> LLMResponse:
     return LLMResponse(tuple(blocks), "stop")
 
@@ -276,6 +290,28 @@ class WebInterfaceTests(unittest.TestCase):
         self.assertEqual(statuses["inventory"]["transport"], "http")
         self.assertEqual(statuses["filesystem"]["state"], "Disabled")
         self.assertEqual(statuses["git"]["state"], "Disabled")
+
+    def test_mcp_status_renders_dynamic_server_states(self) -> None:
+        provider = ScriptedProvider([])
+        manager = DynamicStatusManager()
+        runtime = WebRuntime(
+            provider,
+            manager,
+            log_path=self.log_path,
+            configured_servers=("inventory", "academic-planner", "hotel"),
+            known_servers=("academic-planner", "hotel", "future-server"),
+        )
+        client = TestClient(create_app(lambda: runtime))
+        with client:
+            self.initialize(client)
+            result = client.get("/api/status")
+
+        statuses = {item["key"]: item for item in result.json()["servers"]}
+        self.assertEqual(statuses["academic-planner"]["state"], "Connected")
+        self.assertEqual(statuses["academic-planner"]["tool_count"], 1)
+        self.assertEqual(statuses["hotel"]["state"], "Error")
+        self.assertEqual(statuses["hotel"]["error"], "tools/list failed")
+        self.assertEqual(statuses["future-server"]["state"], "Disabled")
 
     def test_missing_session_and_provider_errors_are_safe(self) -> None:
         client, _, _ = self.make_client(ErrorProvider())

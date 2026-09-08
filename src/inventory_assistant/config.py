@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Mapping
 from urllib.parse import urlparse
 
 from dotenv import load_dotenv
@@ -27,6 +29,9 @@ DEFAULT_ANTHROPIC_MODEL = "claude-haiku-4-5-20251001"
 DEFAULT_OPENAI_MODEL = "gpt-5.6-luna"
 DEFAULT_MCP_LOG_PATH = Path("logs/mcp.jsonl")
 DEFAULT_MCP_DEMO_ROOT = Path("demo_workspace")
+DEFAULT_EXTERNAL_MCP_SERVERS_CONFIG = Path(
+    "config/external_mcp_servers.json"
+)
 DEFAULT_INVENTORY_MCP_HTTP_HOST = "127.0.0.1"
 DEFAULT_INVENTORY_MCP_HTTP_PORT = 8000
 DEFAULT_WEB_HOST = "127.0.0.1"
@@ -175,8 +180,25 @@ class InventoryMCPConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class ConfiguredMCPServer:
+    """One third-party stdio server loaded from local JSON configuration."""
+
+    name: str
+    enabled: bool
+    command: str
+    args: tuple[str, ...]
+    working_directory: Path
+    environment: Mapping[str, str]
+    instructions: str = ""
+
+    @property
+    def launch_command(self) -> tuple[str, ...]:
+        return (self.command, *self.args)
+
+
+@dataclass(frozen=True, slots=True)
 class ExternalMCPConfig:
-    """Configuration for the optional local Filesystem and Git MCP servers."""
+    """Configuration for built-in and arbitrary local stdio MCP servers."""
 
     filesystem_enabled: bool
     filesystem_command: tuple[str, ...]
@@ -184,10 +206,25 @@ class ExternalMCPConfig:
     git_command: tuple[str, ...]
     demo_root: Path
     git_repository: Path
+    servers: tuple[ConfiguredMCPServer, ...] = ()
+    servers_config_path: Path | None = None
 
     @classmethod
     def from_env(cls, *, project_root: Path | None = None) -> "ExternalMCPConfig":
         root = (project_root or Path.cwd()).resolve()
+        configured_servers_path = os.getenv("EXTERNAL_MCP_SERVERS_CONFIG")
+        servers_config_path = _resolve_from(
+            root,
+            Path(
+                configured_servers_path
+                or DEFAULT_EXTERNAL_MCP_SERVERS_CONFIG
+            ),
+        )
+        servers = _load_external_mcp_servers(
+            servers_config_path,
+            project_root=root,
+            required=configured_servers_path is not None,
+        )
         configured_demo_root = Path(
             os.getenv("MCP_DEMO_ROOT", str(DEFAULT_MCP_DEMO_ROOT))
         )
@@ -236,6 +273,8 @@ class ExternalMCPConfig:
             ),
             demo_root=demo_root,
             git_repository=git_repository,
+            servers=servers,
+            servers_config_path=servers_config_path,
         )
 
 
@@ -326,6 +365,175 @@ def _command_arguments_from_env(
     ):
         raise ConfigurationError(f"{name} must be a JSON array of strings")
     return tuple(arguments)
+
+
+_EXTERNAL_SERVER_NAME = re.compile(r"^[A-Za-z0-9_-]+$")
+_CONFIG_VARIABLE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+_EXTERNAL_SERVER_FIELDS = frozenset(
+    {
+        "name",
+        "enabled",
+        "command",
+        "args",
+        "cwd",
+        "env",
+        "instructions",
+    }
+)
+
+
+def _load_external_mcp_servers(
+    path: Path,
+    *,
+    project_root: Path,
+    required: bool,
+) -> tuple[ConfiguredMCPServer, ...]:
+    if not path.exists():
+        if required:
+            raise ConfigurationError(
+                f"EXTERNAL_MCP_SERVERS_CONFIG does not exist: {path}"
+            )
+        return ()
+    if not path.is_file():
+        raise ConfigurationError(
+            f"External MCP server configuration is not a file: {path}"
+        )
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise ConfigurationError(
+            f"Unable to read external MCP server configuration: {path}"
+        ) from error
+    if not isinstance(document, dict) or set(document) != {"servers"}:
+        raise ConfigurationError(
+            "External MCP configuration must contain only a 'servers' array"
+        )
+    raw_servers = document["servers"]
+    if not isinstance(raw_servers, list):
+        raise ConfigurationError(
+            "External MCP configuration 'servers' must be an array"
+        )
+
+    context = {**os.environ, "PROJECT_ROOT": str(project_root)}
+    servers: list[ConfiguredMCPServer] = []
+    names: set[str] = set()
+    for index, raw_server in enumerate(raw_servers):
+        label = f"external MCP server at index {index}"
+        if not isinstance(raw_server, dict):
+            raise ConfigurationError(f"{label} must be an object")
+        unknown = set(raw_server) - _EXTERNAL_SERVER_FIELDS
+        if unknown:
+            raise ConfigurationError(
+                f"{label} contains unknown fields: {', '.join(sorted(unknown))}"
+            )
+        name = raw_server.get("name")
+        if (
+            not isinstance(name, str)
+            or not _EXTERNAL_SERVER_NAME.fullmatch(name)
+            or len(name) > 40
+            or "__" in name
+        ):
+            raise ConfigurationError(
+                f"{label} has an invalid name; use letters, digits, '-' or '_'"
+            )
+        if name in names:
+            raise ConfigurationError(
+                f"External MCP server name is duplicated: {name}"
+            )
+        names.add(name)
+        enabled = raw_server.get("enabled", True)
+        if not isinstance(enabled, bool):
+            raise ConfigurationError(f"{label} enabled must be a boolean")
+        command = raw_server.get("command")
+        if not isinstance(command, str) or not command.strip():
+            raise ConfigurationError(f"{label} command must be a non-empty string")
+        args = raw_server.get("args", [])
+        if not isinstance(args, list) or not all(
+            isinstance(argument, str) for argument in args
+        ):
+            raise ConfigurationError(f"{label} args must be an array of strings")
+        cwd = raw_server.get("cwd", ".")
+        if not isinstance(cwd, str) or not cwd.strip():
+            raise ConfigurationError(f"{label} cwd must be a non-empty string")
+        environment = raw_server.get("env", {})
+        if not isinstance(environment, dict) or not all(
+            isinstance(key, str)
+            and bool(key)
+            and "=" not in key
+            and isinstance(value, str)
+            for key, value in environment.items()
+        ):
+            raise ConfigurationError(
+                f"{label} env must be an object containing string values"
+            )
+        instructions = raw_server.get("instructions", "")
+        if not isinstance(instructions, str):
+            raise ConfigurationError(f"{label} instructions must be a string")
+
+        expanded_command = _expand_config_variables(
+            command.strip(), context, label, require_values=enabled
+        )
+        if _looks_like_path(expanded_command):
+            expanded_command = str(
+                _resolve_from(project_root, Path(expanded_command))
+            )
+        expanded_cwd = _expand_config_variables(
+            cwd.strip(), context, label, require_values=enabled
+        )
+        servers.append(
+            ConfiguredMCPServer(
+                name=name,
+                enabled=enabled,
+                command=expanded_command,
+                args=tuple(
+                    _expand_config_variables(
+                        argument, context, label, require_values=enabled
+                    )
+                    for argument in args
+                ),
+                working_directory=_resolve_from(
+                    project_root, Path(expanded_cwd)
+                ),
+                environment={
+                    key: _expand_config_variables(
+                        value, context, label, require_values=enabled
+                    )
+                    for key, value in environment.items()
+                },
+                instructions=instructions.strip(),
+            )
+        )
+    return tuple(servers)
+
+
+def _expand_config_variables(
+    value: str,
+    context: Mapping[str, str],
+    label: str,
+    *,
+    require_values: bool,
+) -> str:
+    def replace(match: re.Match[str]) -> str:
+        name = match.group(1)
+        replacement = context.get(name)
+        if replacement is None:
+            if not require_values:
+                return match.group(0)
+            raise ConfigurationError(
+                f"{label} references missing environment variable {name}"
+            )
+        return replacement
+
+    return _CONFIG_VARIABLE.sub(replace, value)
+
+
+def _looks_like_path(command: str) -> bool:
+    return (
+        Path(command).is_absolute()
+        or command.startswith(".")
+        or "/" in command
+        or "\\" in command
+    )
 
 
 def _optional_secret_from_env(name: str) -> str | None:

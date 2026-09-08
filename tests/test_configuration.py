@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 import unittest
@@ -118,6 +119,89 @@ class ExternalMCPConfigurationTests(unittest.TestCase):
                     ExternalMCPConfig.from_env(
                         project_root=Path(temporary_directory)
                     )
+
+    def test_loads_arbitrary_stdio_servers_from_versionable_json(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            project_root = Path(temporary_directory)
+            config_directory = project_root / "config"
+            config_directory.mkdir()
+            config_path = config_directory / "servers.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "servers": [
+                            {
+                                "name": "academic-planner",
+                                "enabled": True,
+                                "command": "${ACADEMIC_PYTHON}",
+                                "args": ["-m", "src.server"],
+                                "cwd": "vendor/academic",
+                                "env": {"DATA_PATH": "${PROJECT_ROOT}/data/academic.db"},
+                                "instructions": "Academic planning",
+                            },
+                            {
+                                "name": "hotel",
+                                "enabled": False,
+                                "command": "${MISSING_WHILE_DISABLED}",
+                                "args": ["-m", "hotel_mcp"],
+                                "cwd": "vendor/hotel",
+                            },
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            environment = {
+                "EXTERNAL_MCP_SERVERS_CONFIG": "config/servers.json",
+                "ACADEMIC_PYTHON": "./venvs/academic/python",
+            }
+            with patch.dict(os.environ, environment, clear=True):
+                config = ExternalMCPConfig.from_env(project_root=project_root)
+
+        self.assertEqual(
+            [server.name for server in config.servers],
+            ["academic-planner", "hotel"],
+        )
+        academic = config.servers[0]
+        self.assertTrue(academic.enabled)
+        self.assertEqual(
+            academic.command,
+            str((project_root / "venvs/academic/python").resolve()),
+        )
+        self.assertEqual(academic.args, ("-m", "src.server"))
+        self.assertEqual(
+            academic.working_directory,
+            (project_root / "vendor/academic").resolve(),
+        )
+        self.assertEqual(
+            Path(academic.environment["DATA_PATH"]),
+            project_root / "data/academic.db",
+        )
+        self.assertFalse(config.servers[1].enabled)
+
+    def test_explicit_missing_or_invalid_external_config_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            project_root = Path(temporary_directory)
+            with patch.dict(
+                os.environ,
+                {"EXTERNAL_MCP_SERVERS_CONFIG": "missing.json"},
+                clear=True,
+            ):
+                with self.assertRaises(ConfigurationError):
+                    ExternalMCPConfig.from_env(project_root=project_root)
+
+            invalid_path = project_root / "invalid.json"
+            invalid_path.write_text(
+                '{"servers":[{"name":"bad__name","command":"python"}]}',
+                encoding="utf-8",
+            )
+            with patch.dict(
+                os.environ,
+                {"EXTERNAL_MCP_SERVERS_CONFIG": str(invalid_path)},
+                clear=True,
+            ):
+                with self.assertRaises(ConfigurationError):
+                    ExternalMCPConfig.from_env(project_root=project_root)
 
 
 class InventoryMCPConfigurationTests(unittest.TestCase):

@@ -263,7 +263,12 @@ function renderServerStatus(servers) {
     name.textContent = server.name;
     const meta = document.createElement("span");
     meta.className = "server-meta";
-    meta.textContent = server.transport ? `${server.transport} · ${server.tool_count} tools` : "Not configured";
+    if (server.state === "Error" && server.error) {
+      meta.textContent = `${server.transport || "stdio"} - ${server.error}`;
+      meta.title = server.error;
+    } else {
+      meta.textContent = server.transport ? `${server.transport} - ${server.tool_count} tools` : "Not configured";
+    }
     const stateLabel = document.createElement("span");
     stateLabel.className = "server-state-label";
     stateLabel.textContent = server.state;

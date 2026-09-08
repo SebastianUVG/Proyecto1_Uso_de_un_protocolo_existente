@@ -89,7 +89,11 @@ def main() -> None:
 def _show_servers(manager: MCPServerManager) -> None:
     for status in manager.statuses:
         state = "connected" if status.connected else "disconnected"
-        print(f"{status.name} ({status.transport}): {state}, {len(status.tools)} tools")
+        details = f", error: {status.error}" if status.error else ""
+        print(
+            f"{status.name} ({status.transport}): {state}, "
+            f"{len(status.tools)} tools{details}"
+        )
 
 
 def _show_recent_logs(path: Path, limit: int = 20) -> None:

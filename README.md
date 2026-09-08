@@ -298,6 +298,88 @@ git__git_status
 
 The manager keeps the mapping back to the original server and tool name. Consequently, equal tool names from different servers cannot collide, and no keyword routing is needed.
 
+## External Student MCP Servers
+
+The host can launch arbitrary third-party MCP servers over stdio without importing
+their Python modules or copying their tool definitions. Each enabled process goes
+through `initialize`, `notifications/initialized`, and `tools/list`; that live
+`tools/list` response is the only source used to build the OpenAI tool catalog.
+
+First clone each external server beside this repository and install it according
+to its own README, including its own virtual environment. Copy the safe template:
+
+```powershell
+Copy-Item config/external_mcp_servers.example.json config/external_mcp_servers.json
+```
+
+The destination is ignored by Git so it can contain machine-local commands. Its
+format is:
+
+```json
+{
+  "servers": [
+    {
+      "name": "academic-planner",
+      "enabled": true,
+      "command": "${ACADEMIC_PLANNER_PYTHON}",
+      "args": ["-m", "src.server"],
+      "cwd": "../academic-planner-mcp",
+      "env": {},
+      "instructions": "Use this server for academic tasks, workload, and study planning."
+    },
+    {
+      "name": "hotel",
+      "enabled": true,
+      "command": "${HOTEL_MCP_PYTHON}",
+      "args": ["-m", "hotel_mcp"],
+      "cwd": "../hotel-mcp-server",
+      "env": {},
+      "instructions": "Use this server for hotel availability and operations."
+    }
+  ]
+}
+```
+
+`command` is one executable, while `args` contains its arguments. `cwd` and
+path-like commands are resolved from this project's root, not from the JSON file.
+Every child inherits the host environment, and optional `env` string values
+override variables only for that child. `${VARIABLE}` placeholders are expanded
+from the host environment; `${PROJECT_ROOT}` is supplied automatically.
+
+For example, place the interpreter locations in the root `.env` file on Windows:
+
+```dotenv
+ACADEMIC_PLANNER_PYTHON=../academic-planner-mcp/.venv/Scripts/python.exe
+HOTEL_MCP_PYTHON=../hotel-mcp-server/.venv/Scripts/python.exe
+EXTERNAL_MCP_SERVERS_CONFIG=config/external_mcp_servers.json
+```
+
+On macOS/Linux, use each environment's `bin/python` instead. Adjust the virtual
+environment folder name to match how that external project was installed.
+
+To add a third server, append another object and restart the CLI or Web process;
+no Python change is required. Names exposed to OpenAI use
+`<server>__<original-tool>`, while `tools/call` sends the original name back to
+the owning process. Unsafe characters are converted deterministically and a short
+hash resolves any resulting collision. Equal names from different servers never
+overwrite each other.
+
+Disabled entries appear as **Disabled** in the Web UI. A process, initialization,
+or `tools/list` failure appears as **Error** with its reason, while healthy servers
+remain usable. MCP logs include the configured server name and never include the
+configured child environment.
+
+The host still requires confirmation for the five known Inventory write tools.
+Third-party annotations are preserved in their discovered definitions, but MCP
+tool metadata does not provide a universally reliable write classification. This
+stage therefore does not guess whether an arbitrary external tool mutates state;
+review a third-party server before enabling it and apply an appropriate host policy.
+
+The existing Docker Compose stack remains self-contained and does not copy sibling
+repositories or the ignored local JSON file into its image. External student
+servers are therefore a local-host feature unless you deliberately build a custom
+container setup that mounts and installs those independent projects.
+
 The versions used during validation exposed these tools dynamically:
 
 - Inventory: `get_product_stock`, `get_low_stock_products`, `get_restock_recommendations`, `get_product_movements`, `get_inactive_products`, `get_product_movement_ranking`.
@@ -864,7 +946,8 @@ Terminal chatbot or Web UI
        |-> LocalMCPClient --stdio----------> Inventory MCP core
        |-> HTTPMCPClient --HTTP--> HTTP Server -> Inventory MCP core
        |-> LocalMCPClient --stdio----------> Filesystem MCP Server
-       `-> LocalMCPClient --stdio----------> Git MCP Server
+       |-> LocalMCPClient --stdio----------> Git MCP Server
+       `-> LocalMCPClient --stdio----------> configured third-party servers
 Inventory MCP core (shared by the stdio and HTTP routes above)
     -> Inventory Tool Dispatcher
     -> InventoryService
@@ -910,6 +993,8 @@ Implemented:
 - Optional HTTP Bearer authentication and configurable exact Origin allowlist
 - Render Blueprint with `/health` and a persistent `/app/data` disk
 - Multiple independent MCP connections, with Inventory selectable as stdio or HTTP
+- Arbitrary local stdio MCP servers loaded from an ignored JSON configuration
+- Per-server startup isolation, dynamic status, namespacing, and tool routing
 - Dynamic cross-server tool discovery and namespaced routing
 - Sandboxed Filesystem MCP integration
 - Repository-restricted Git MCP integration
