@@ -176,6 +176,7 @@ def create_app(
 
     @application.get("/api/logs")
     def logs(
+        response: Response,
         limit: int = Query(default=50, ge=1, le=200),
         session_id: str | None = Cookie(default=None, alias=SESSION_COOKIE),
     ) -> dict[str, Any]:
@@ -184,6 +185,7 @@ def create_app(
             records = _runtime(application).recent_logs(limit)
         except WebRuntimeError as error:
             raise HTTPException(status_code=500, detail=str(error)) from error
+        response.headers["Cache-Control"] = "no-store"
         return {"logs": records}
 
     application.mount(

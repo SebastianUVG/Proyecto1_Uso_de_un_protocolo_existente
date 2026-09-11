@@ -305,7 +305,7 @@ async function refreshLogs() {
   loading.textContent = "Loading logs…";
   elements.logsList.append(loading);
   try {
-    const response = await api("/api/logs?limit=75");
+    const response = await api("/api/logs?limit=75", { cache: "no-store" });
     renderLogs(response.logs || []);
   } catch (error) {
     elements.logsList.replaceChildren();

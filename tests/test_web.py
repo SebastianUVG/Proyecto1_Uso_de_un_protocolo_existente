@@ -188,11 +188,15 @@ class WebInterfaceTests(unittest.TestCase):
             stylesheet = client.get("/static/styles.css")
         self.assertEqual(page.status_code, 200)
         self.assertIn("Inventory Assistant", page.text)
+        self.assertIn("styles.css?v=20260908-logs-layout", page.text)
+        self.assertIn("app.js?v=20260908-logs-layout", page.text)
         self.assertEqual(script.status_code, 200)
         self.assertEqual(stylesheet.status_code, 200)
         self.assertNotIn("innerHTML", script.text)
         self.assertIn('document.createElement("table")', script.text)
         self.assertIn("renderMarkdown", script.text)
+        self.assertIn("grid-auto-rows: max-content", stylesheet.text)
+        self.assertIn("flex: 1 1 auto", stylesheet.text)
 
     def test_health_endpoint_requires_a_ready_runtime(self) -> None:
         provider = ScriptedProvider([])
@@ -523,6 +527,7 @@ class WebInterfaceTests(unittest.TestCase):
             all_logs = client.get("/api/logs?limit=10")
 
         self.assertEqual(result.status_code, 200)
+        self.assertEqual(result.headers["cache-control"], "no-store")
         self.assertEqual(len(result.json()["logs"]), 1)
         serialized = json.dumps(all_logs.json())
         self.assertNotIn(secret, serialized)
